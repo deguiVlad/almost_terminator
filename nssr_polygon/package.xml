@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>nssr_polygon</name>
+  <version>1.0.0</version>
+  <description>ROS 2 side of the nssr-polygon manipulation simulator: tasks and self-check, robot command semantics of the TienKung SDK, camera streams.</description>
+  <maintainer email="nssr.nikolay@gmail.com">Nikolay Semenov</maintainer>
+  <author email="nssr.nikolay@gmail.com">Nikolay Semenov</author>
+  <license>Apache-2.0</license>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>builtin_interfaces</exec_depend>
+  <exec_depend>bodyctrl_msgs</exec_depend>
+  <exec_depend>python3-zmq</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

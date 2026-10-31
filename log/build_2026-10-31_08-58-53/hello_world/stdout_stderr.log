@@ -1,0 +1,35 @@
+running egg_info
+creating ../build/hello_world/hello_world.egg-info
+writing ../build/hello_world/hello_world.egg-info/PKG-INFO
+writing dependency_links to ../build/hello_world/hello_world.egg-info/dependency_links.txt
+writing entry points to ../build/hello_world/hello_world.egg-info/entry_points.txt
+writing requirements to ../build/hello_world/hello_world.egg-info/requires.txt
+writing top-level names to ../build/hello_world/hello_world.egg-info/top_level.txt
+writing manifest file '../build/hello_world/hello_world.egg-info/SOURCES.txt'
+reading manifest file '../build/hello_world/hello_world.egg-info/SOURCES.txt'
+writing manifest file '../build/hello_world/hello_world.egg-info/SOURCES.txt'
+running build
+running build_py
+creating /nssr_sim/hackathon/ros2/build/hello_world/build
+creating /nssr_sim/hackathon/ros2/build/hello_world/build/lib
+creating /nssr_sim/hackathon/ros2/build/hello_world/build/lib/hello_world
+copying hello_world/hello.py -> /nssr_sim/hackathon/ros2/build/hello_world/build/lib/hello_world
+copying hello_world/__init__.py -> /nssr_sim/hackathon/ros2/build/hello_world/build/lib/hello_world
+running install
+running install_lib
+creating /nssr_sim/hackathon/ros2/install/hello_world/lib/python3.10/site-packages/hello_world
+copying /nssr_sim/hackathon/ros2/build/hello_world/build/lib/hello_world/hello.py -> /nssr_sim/hackathon/ros2/install/hello_world/lib/python3.10/site-packages/hello_world
+copying /nssr_sim/hackathon/ros2/build/hello_world/build/lib/hello_world/__init__.py -> /nssr_sim/hackathon/ros2/install/hello_world/lib/python3.10/site-packages/hello_world
+byte-compiling /nssr_sim/hackathon/ros2/install/hello_world/lib/python3.10/site-packages/hello_world/hello.py to hello.cpython-310.pyc
+byte-compiling /nssr_sim/hackathon/ros2/install/hello_world/lib/python3.10/site-packages/hello_world/__init__.py to __init__.cpython-310.pyc
+running install_data
+creating /nssr_sim/hackathon/ros2/install/hello_world/share/ament_index
+creating /nssr_sim/hackathon/ros2/install/hello_world/share/ament_index/resource_index
+creating /nssr_sim/hackathon/ros2/install/hello_world/share/ament_index/resource_index/packages
+copying resource/hello_world -> /nssr_sim/hackathon/ros2/install/hello_world/share/ament_index/resource_index/packages
+copying package.xml -> /nssr_sim/hackathon/ros2/install/hello_world/share/hello_world
+running install_egg_info
+Copying ../build/hello_world/hello_world.egg-info to /nssr_sim/hackathon/ros2/install/hello_world/lib/python3.10/site-packages/hello_world-1.0.0-py3.10.egg-info
+running install_scripts
+Installing hello script to /nssr_sim/hackathon/ros2/install/hello_world/lib/hello_world
+writing list of installed files to '/nssr_sim/hackathon/ros2/build/hello_world/install.log'

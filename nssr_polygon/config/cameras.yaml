@@ -1,0 +1,19 @@
+# Camera streams of the simulator: ROS topics and frames of the head and torso cameras.
+# Author: Nikolay Semenov <nssr.nikolay@gmail.com>
+zmq:
+  host: 127.0.0.1
+  port: 5557
+qos_depth: 2
+cameras:
+  cam_head:
+    color_topic: /cam_head/color/image_raw
+    color_info_topic: /cam_head/color/camera_info
+    depth_topic: /cam_head/depth/image_raw
+    depth_info_topic: /cam_head/depth/camera_info
+    frame_id: camera_head_link
+  cam_torso:
+    color_topic: /cam_torso/color/image_raw
+    color_info_topic: /cam_torso/color/camera_info
+    depth_topic: /cam_torso/depth/image_raw
+    depth_info_topic: /cam_torso/depth/camera_info
+    frame_id: camera_body_front_link

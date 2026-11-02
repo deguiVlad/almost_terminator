@@ -8,10 +8,11 @@
 //   motor 2 = head_pitch_joint (кивок)
 //   motor 3 = head_yaw_joint   (поворот)
 //
-// Траектория — «окружность» на сфере взгляда: pitch и roll задаются двумя
-// синусоидами, сдвинутыми по фазе на 90°, а yaw плавно покачивается третьей
-// синусоидой. То есть в каждом кадре одновременно движутся ВСЕ ТРИ мотора
-// (движение суммарно несколькими моторами).
+// Траектория — «окружность» в плоскости кивок/поворот: pitch и yaw задаются
+// двумя синусоидами, сдвинутыми по фазе на 90° (квадратура). Наклон головы
+// (roll, motor 1) НЕ используется — круг только «кивок + поворот».
+// В каждом кадре одновременно движутся ОБА мотора (движение суммарно
+// несколькими моторами).
 //
 // Плавность: фаза траектории вычисляется из ВРЕМЕНИ СИМУЛЯТОРА — узел подписан
 // на топик /clock (rosgraph_msgs/msg/Clock, sim time, ~20 Гц по чит-шиту) и
@@ -34,7 +35,6 @@
 
 
 // ID моторов головы (первая цифра 0 = голова)
-constexpr uint16_t MOTOR_HEAD_ROLL = 1;
 constexpr uint16_t MOTOR_HEAD_PITCH = 2;
 constexpr uint16_t MOTOR_HEAD_YAW = 3;
 
@@ -49,9 +49,8 @@ public:
 
         // Параметры сценария
         period_s_  = declare_parameter<double>("circle_period_s", 8.0);  // оборот окружности, c
-        amp_pitch_ = declare_parameter<double>("amp_pitch", 0.15);       // амплитуда pitch, рад
-        amp_roll_  = declare_parameter<double>("amp_roll", 0.10);        // амплитуда roll, рад
-        amp_yaw_   = declare_parameter<double>("amp_yaw", 0.25);         // амплитуда покачивания yaw, рад
+        amp_pitch_ = declare_parameter<double>("amp_pitch", 0.15);       // амплитуда pitch (кивок), рад
+        amp_yaw_   = declare_parameter<double>("amp_yaw", 0.25);         // амплитуда yaw (поворот), рад
         spd_rpm_   = declare_parameter<double>("spd_rpm", 5.0);          // скорость моторов, rpm
         cur_a_     = declare_parameter<double>("cur_a", 1.0);            // ограничение тока, A
         const double rate_hz = declare_parameter<double>("publish_rate_hz", 20.0);
@@ -79,9 +78,9 @@ public:
             std::bind(&HeadCirclePublisher::tick, this));
 
         RCLCPP_INFO(get_logger(),
-            "Head circle demo started: /head/cmd_pos, period %.1f s, "
-            "amp(pitch=%.2f, roll=%.2f, yaw=%.2f rad), rate %.1f Hz (sim time from /clock)",
-            period_s_, amp_pitch_, amp_roll_, amp_yaw_, rate_hz);
+            "Head circle demo started (no roll): /head/cmd_pos, period %.1f s, "
+            "amp(pitch=%.2f, yaw=%.2f rad), rate %.1f Hz (sim time from /clock)",
+            period_s_, amp_pitch_, amp_yaw_, rate_hz);
     }
 
 private:
@@ -117,26 +116,24 @@ private:
         const double t = now_s - t0_.seconds();
         const double w = 2.0 * M_PI / period_s_;   // угловая частота круга
 
-        // Окружность: pitch и roll в квадратуре (сдвиг фаз 90°), yaw — медленное
-        // покачивание вполовину чаще/реже. Все три мотора двигаются
-        // одновременно -> плавное круговое движение головы.
+        // Окружность БЕЗ НАКЛОНА: pitch (кивок) и yaw (поворот) в квадратуре
+        // (сдвиг фаз 90°). Оба мотора движутся одновременно -> суммарный вектор
+        // взгляда плавно чертит круг в плоскости вверх-вниз / влево-вправо.
         const float pitch = static_cast<float>(amp_pitch_ * std::sin(w * t));
-        const float roll  = static_cast<float>(amp_roll_  * std::cos(w * t));
-        const float yaw   = static_cast<float>(amp_yaw_   * std::sin(0.5 * w * t));
+        const float yaw   = static_cast<float>(amp_yaw_   * std::cos(w * t));
 
         const float spd = static_cast<float>(spd_rpm_);
         const float cur = static_cast<float>(cur_a_);
 
         bodyctrl_msgs::msg::CmdSetMotorPosition msg;
         msg.cmds = {
-            make_cmd(MOTOR_HEAD_ROLL, roll, spd, cur),
             make_cmd(MOTOR_HEAD_PITCH, pitch, spd, cur),
             make_cmd(MOTOR_HEAD_YAW, yaw, spd, cur),
         };
         cmd_pub_->publish(msg);
 
-        RCLCPP_DEBUG(get_logger(), "sim t=%.2f s -> roll=%.3f pitch=%.3f yaw=%.3f rad",
-                     t, roll, pitch, yaw);
+        RCLCPP_DEBUG(get_logger(), "sim t=%.2f s -> pitch=%.3f yaw=%.3f rad",
+                     t, pitch, yaw);
     }
 
     rclcpp::Publisher<bodyctrl_msgs::msg::CmdSetMotorPosition>::SharedPtr cmd_pub_;
@@ -149,7 +146,6 @@ private:
 
     double period_s_{8.0};
     double amp_pitch_{0.15};
-    double amp_roll_{0.10};
     double amp_yaw_{0.25};
     double spd_rpm_{5.0};
     double cur_a_{1.0};

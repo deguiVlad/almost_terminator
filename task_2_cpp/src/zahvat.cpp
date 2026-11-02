@@ -1,9 +1,14 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <geometry_msgs/msg/point.hpp> // Для координат цели с камеры
+#include <geometry_msgs/msg/vector3.hpp>
 #include <control_msgs/msg/joint_jog.hpp> // Для управления скоростью суставов
+#include <functional> // std::bind, std::placeholders - для callback
 #include <algorithm>
 #include <cmath>
+#include <memory>
+#include <chrono>
+#include <string>
 
 class RobotCoordinator : public rclcpp::Node {
 public:

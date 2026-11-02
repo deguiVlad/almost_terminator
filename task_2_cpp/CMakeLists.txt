@@ -18,6 +18,7 @@ find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(control_msgs REQUIRED)
 find_package(bodyctrl_msgs REQUIRED)
+find_package(rosgraph_msgs REQUIRED)
 
 # Создаём исполняемый файл
 add_executable(zahvat_node src/zahvat.cpp)
@@ -36,6 +37,7 @@ ament_target_dependencies(zahvat_node
 ament_target_dependencies(head_demo_node
   rclcpp
   bodyctrl_msgs
+  rosgraph_msgs
 )
 
 # Устанавливаем ноды, чтобы их можно было запустить через ros2 run

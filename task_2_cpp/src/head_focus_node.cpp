@@ -25,7 +25,7 @@
 //   false = IDLE   (возврат в нейтральную позицию)
 //
 // Запуск:
-//   ros2 run task_2_cpp head_focus_node --ros-args \
+//   ros2 run task_2_cpp head_focus_node --ros-args
 //     -p yaw_limit:=0.6 -p pitch_limit:=0.4 -p deadzone_px:=20
 
 #include <algorithm>
@@ -187,7 +187,7 @@ private:
     double fx_{0}, fy_{0}, cx_{0}, cy_{0};
     double tx_{0}, ty_{0}, tz_{0};
     double tgt_yaw_{0}, tgt_pitch_{0}, cur_yaw_{0}, cur_pitch_{0};
-    rclcpp::Time last_target_time_{0, 0, RCLCPP_STEADY_TIME};
+    rclcpp::Time last_target_time_{0, 0, RCL_STEADY_TIME};
 
     rclcpp::Publisher<bodyctrl_msgs::msg::CmdSetMotorPosition>::SharedPtr cmd_pub_;
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr info_sub_;

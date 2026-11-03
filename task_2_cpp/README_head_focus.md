@@ -48,49 +48,12 @@ colcon build --packages-select task_2_cpp && source install/setup.bash
 ros2 run task_2_cpp head_focus_node --ros-args \
   -p yaw_limit:=0.6 -p pitch_limit:=0.4 -p deadzone_px:=20
 
-# тест без детектора — подать фиктивную цель (см. подробности ниже):
+# тест без детектора — подать фиктивную цель:
 ros2 topic pub -r 10 /head_focus/target geometry_msgs/msg/PoseStamped \
   "{header: {frame_id: camera_head_link}, pose: {position: {x: 0.3, y: 0.0, z: 1.5}}}"
 
 # выключить слежение:
 ros2 service call /head_focus/set_mode std_srvs/srv/SetBool "{data: false}"
-```
-
-## Как задавать цели через `ros2 topic pub`
-
-Топик цели — `/head_focus/target`, тип `geometry_msgs/msg/PoseStamped`.
-Координаты — в `camera_head_link` (оптическая ось камеры = **+Z**, **+X** вправо, **+Y** вниз), метры.
-`pose.orientation` нода игнорирует — важен только `position`.
-
-```bash
-# объект прямо перед камерой на расстоянии 1.5 м (голова остаётся в нейтрали)
-ros2 topic pub -r 10 /head_focus/target geometry_msgs/msg/PoseStamped \
-  "{header: {frame_id: camera_head_link}, pose: {position: {x: 0.0, y: 0.0, z: 1.5}}}"
-
-# цель справа от камеры -> поворот головы вправо (yaw+)
-ros2 topic pub -r 10 /head_focus/target geometry_msgs/msg/PoseStamped \
-  "{header: {frame_id: camera_head_link}, pose: {position: {x: 0.5, y: 0.0, z: 1.5}}}"
-
-# цель слева и выше -> yaw- и pitch вверх
-ros2 topic pub -r 10 /head_focus/target geometry_msgs/msg/PoseStamped \
-  "{header: {frame_id: camera_head_link}, pose: {position: {x: -0.4, y: -0.3, z: 1.2}}}"
-
-# разовая команда (одна публикация вместо потока)
-ros2 topic pub --once /head_focus/target geometry_msgs/msg/PoseStamped \
-  "{header: {frame_id: camera_head_link}, pose: {position: {x: 0.2, y: 0.1, z: 1.0}}}"
-
-# «сопоставление по времени»: цель живёт target_timeout_s (по умолч. 1 с) —
-# чтобы голова не вернулась в нейтраль, публикуйте поток >= 2 Гц (-r 10 достаточно).
-# Сменить лимиты/таймаут при запуске ноды:
-ros2 run task_2_cpp head_focus_node --ros-args -p target_timeout_s:=2.0
-```
-
-Полезные проверки:
-
-```bash
-ros2 topic echo /head_focus/target        # что получает нода
-ros2 topic echo /head/cmd_pos             # команды моторов (pitch=name "2", yaw="3")
-ros2 topic hz  /cam_head/color/camera_info  # интринсики нужны для deadzone в пикселях
 ```
 
 ## Как подключить детектор объектов

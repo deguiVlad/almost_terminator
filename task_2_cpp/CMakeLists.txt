@@ -19,6 +19,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(control_msgs REQUIRED)
 find_package(bodyctrl_msgs REQUIRED)
 find_package(rosgraph_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 
 # Создаём исполняемый файл
 add_executable(zahvat_node src/zahvat.cpp)

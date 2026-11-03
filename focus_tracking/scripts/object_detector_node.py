@@ -75,11 +75,14 @@ class ObjectDetectorNode(Node):
     def __init__(self):
         super().__init__("object_detector_node")
 
-        self.declare_parameter("color_names", [])     # имена окон (строки)
-        self.declare_parameter("red_window", [])     # [h_lo,s_lo,v_lo,h_hi,s_hi,v_hi]
-        self.declare_parameter("green_window", [])
-        self.declare_parameter("blue_window", [])
-        self.declare_parameter("yellow_window", [])
+        # ВАЖНО: пустой список [] как дефолт в rclpy имеет тип BYTE_ARRAY, и
+        # загрузка из YAML строкового/float-списка вызвала бы InvalidParameterTypeException.
+        # Поэтому дефолты — ненулевые списки корректного типа.
+        self.declare_parameter("color_names", ["__default__"])   # имена окон (строки)
+        self.declare_parameter("red_window", [-1.0])     # [h_lo,s_lo,v_lo,h_hi,s_hi,v_hi]
+        self.declare_parameter("green_window", [-1.0])
+        self.declare_parameter("blue_window", [-1.0])
+        self.declare_parameter("yellow_window", [-1.0])
         self.declare_parameter("min_area", 300.0)
         self.declare_parameter("depth_window", 9)
         self.declare_parameter("max_range_m", 5.5)   # depth==0 => нет данных (>6 м)
@@ -98,7 +101,7 @@ class ObjectDetectorNode(Node):
         # ни использовать вложенные списки. Поэтому каждое окно — отдельный
         # плоский float-параметр <имя>_window, а имена — строковый список color_names.
         names = self.get_parameter("color_names").value
-        if not names:
+        if not names or names == ["__default__"]:
             names = list(DEFAULT_COLORS)
         self.colors = {}
         for name in names:
@@ -106,7 +109,7 @@ class ObjectDetectorNode(Node):
             win = []
             param_name = f"{name}_window"
             if self.has_parameter(param_name):
-                win = self.get_parameter(param_name).value
+                win = self.get_parameter(param_name).value or []
             if len(win) == 6:
                 self.colors[name] = [float(x) for x in win]
             elif name in DEFAULT_COLORS:

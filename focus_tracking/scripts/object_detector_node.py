@@ -32,7 +32,8 @@ YOLO не нужен, хватает HSV-детектора + глубины (64
   ВХОД  /cam_head/color/camera_info sensor_msgs/CameraInfo
   ВЫХОД /focus/target               geometry_msgs/PoseStamped
   СЕРВИС /focus/detect              focus_tracking/srv/DetectObjects
-  ПАРАМЕТР colors                   dict имя->HSV окно {name:[h_lo,s_lo,v_lo,h_hi,s_hi,v_hi]}
+  ПАРАМЕТР color_windows            вложенный список [[h_lo,s_lo,v_lo,h_hi,s_hi,v_hi], ...]
+  ПАРАМЕТР color_names              имена окон по порядку (по умолчанию red,green,blue,yellow)
   ПАРАМЕТР min_area                 минимальная площадь blob в пикселях (по умолчанию 300)
   ПАРАМЕТР auto_select              true — публиковать самый большой blob сам (без сервиса)
   ПАРАМЕТР match_radius_m           порог сопоставления blob с существующим id, м
@@ -73,7 +74,8 @@ class ObjectDetectorNode(Node):
     def __init__(self):
         super().__init__("object_detector_node")
 
-        self.declare_parameter("colors", [])          # плоский список: name,h_lo,...,v_hi x N
+        self.declare_parameter("color_windows", [])   # [[h_lo,s_lo,v_lo,h_hi,s_hi,v_hi], ...]
+        self.declare_parameter("color_names", [])     # имена окон по порядку
         self.declare_parameter("min_area", 300.0)
         self.declare_parameter("depth_window", 9)
         self.declare_parameter("max_range_m", 5.5)   # depth==0 => нет данных (>6 м)
@@ -88,12 +90,21 @@ class ObjectDetectorNode(Node):
         self.match_r = float(self.get_parameter("match_radius_m").value)
         self.ttl = float(self.get_parameter("ttl_s").value)
 
-        flat = self.get_parameter("colors").value
-        if flat:
+        # ROS 2 не позволяет смешивать строки и числа в одном параметре-списке,
+        # поэтому окна (только числа) и имена (только строки) — два отдельных параметра.
+        windows = self.get_parameter("color_windows").value
+        names = self.get_parameter("color_names").value
+        if windows:
+            default_names = list(DEFAULT_COLORS)
             self.colors = {}
-            for i in range(0, len(flat), 7):
-                name = str(flat[i])
-                self.colors[name] = [float(x) for x in flat[i + 1:i + 7]]
+            for i, win in enumerate(windows):
+                if i < len(names):
+                    name = str(names[i])
+                elif i < len(default_names):
+                    name = default_names[i]
+                else:
+                    name = f"color_{i + 1}"
+                self.colors[name] = [float(x) for x in win]
         else:
             self.colors = dict(DEFAULT_COLORS)
 

@@ -177,7 +177,7 @@ q* = (w_obj·q_obj + w_hand·q_hand) / (w_obj + w_hand)
 
 | Нода | Язык | Вход | Выход | Зависимости | Почему так |
 |---|---|---|---|---|---|
-| `object_detector_node.py` | Python (rclpy) | color+depth+camera_info, /sim/task | `/focus/target` | `rclpy, cv2 (opencv-python), numpy, message_filters, sensor_msgs, geometry_msgs, std_msgs` | CV/ML-экосистема; 640×360 HSV-детектор ~5 мс/кадр на CPU — частота не критична |
+| `object_detector_node.py` | Python (rclpy) | color+depth+camera_info; сервис `/focus/detect` | `/focus/target` | `rclpy, cv2 (opencv-python), numpy, message_filters, sensor_msgs, geometry_msgs, focus_tracking/srv/DetectObjects` | CV/ML-экосистема; 640×360 HSV-детектор ~5 мс/кадр на CPU — частота не критична |
 | `hand_tracker_node.cpp` | C++ (rclcpp) | TF2 (`/tf`,`/tf_static`), camera_info | `/focus/hand`, `/focus/hand_visible` | `rclcpp, tf2_ros, tf2_geometry_msgs, geometry_msgs, sensor_msgs, std_msgs, std_srvs` | 50 Гц, нулевой GC-джиттер, чистая математика матриц — vision не нужен |
 | `focus_controller_node.cpp` | C++ (rclcpp) | `/focus/target`, `/focus/hand`, `/head/status`, camera_info | `/head/cmd_pos` | `rclcpp, bodyctrl_msgs, geometry_msgs, sensor_msgs, std_srvs` | развитие готового `head_focus_node`; единый интерфейс цели ⇒ математика п.1–2 идентична для объекта и руки |
 
@@ -186,6 +186,37 @@ q* = (w_obj·q_obj + w_hand·q_hand) / (w_obj + w_hand)
 `camera_head_link`**. Контроллеру безразлично, откуда пришла цель — объект,
 левая рука, правая рука или человек; добавить новый источник = написать ещё
 одну ноду-паблишер, не трогая контроллер.
+
+### Ручной выбор цели: список объектов и фокусировка по id/названию
+
+Детектор держит последний синхронизированный RGB-D кадр и умеет отвечать на
+запрос оператора — сервис `focus_tracking/srv/DetectObjects` (`/focus/detect`):
+
+```
+string select_name   # 'red' | 'green' | ... ; '' = не выбирать по имени
+uint8  select_id     # 1..N из ответа; 0 = не выбирать по id (приоритет у select_name)
+---
+string[] names       # имена объектов, отсортированы по площади blob (убыв.)
+uint8[] ids          # id (1..N), соответствуют names
+float64[] areas_px   # площадь в пикселях
+geometry_msgs/PoseStamped[] targets  # 3D-позиции в camera_head_link
+bool selected_ok
+string message       # человекочитаемый статус
+```
+
+Алгоритм детекции для списка: по каждому именованному HSV-окну строится маска
+(красный — склейка двух диапазонов, тон огибает 0), морфология OPEN 5×5,
+largest connected component; объекты ранжируются по убыванию площади, id
+присваиваются после сортировки. Вызов без `select_*` возвращает список и **не**
+меняет цель; вызов с `select_name`/`select_id` публикует выбранную позицию в
+`/focus/target` (pinhole-проекция как в п.1). Параметр `auto_select:=false`
+полностью отдает публикацию цели под управление оператора.
+
+```bash
+ros2 service call /focus/detect focus_tracking/srv/DetectObjects                       # список
+ros2 service call /focus/detect focus_tracking/srv/DetectObjects "{select_name: red}"   # фокус по имени
+ros2 service call /focus/detect focus_tracking/srv/DetectObjects "{select_id: 3}"       # фокус по id
+```
 
 ### Сборка и запуск
 

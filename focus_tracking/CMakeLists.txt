@@ -15,9 +15,19 @@ find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(message_filters REQUIRED)
 find_package(bodyctrl_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+
+# --- собственные srv ------------------------------------------------------
+# DetectObjects: ручной список обнаруженных объектов + выбор цели по id/имени.
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "srv/DetectObjects.srv"
+  DEPENDENCIES geometry_msgs
+)
 
 # --- C++ ноды -------------------------------------------------------------
 
@@ -38,16 +48,24 @@ install(TARGETS
 )
 
 # --- Python ноды ----------------------------------------------------------
+# object_detector_node.py использует сгенерированный srv-модуль этого пакета,
+# поэтому должен быть собран в PYTHONPATH после rosidl_generate_interfaces.
+
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(hand_tracker_node "${cpp_typesupport_target}")
 
 install(PROGRAMS
   scripts/object_detector_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# запускной скрипт-обёртка не нужен: srv доступны через ament_python_index (см. package.xml)
+
 # --- launch + config ------------------------------------------------------
 
-install(DIRECTORY launch config
+install(DIRECTORY launch config srv
   DESTINATION share/${PROJECT_NAME}
 )
 
+ament_export_dependencies(rosidl_default_runtime)
 ament_package()

@@ -1,0 +1,14 @@
+# DetectObjects.srv — ручная выдача списка обнаруженных объектов и выбор цели по id/имени.
+# Примеры:
+#   ros2 service call /focus/detect focus_tracking/srv/DetectObjects
+#   ros2 service call /focus/detect focus_tracking/srv/DetectObjects "{select_name: red}"
+#   ros2 service call /focus/detect focus_tracking/srv/DetectObjects "{select_id: 3}"
+string select_name   # имя объекта ('red','green',...); пустая строка = не выбирать по имени
+uint8 select_id      # id объекта (1..N); 0 = не выбирать по id (имеет приоритет select_name)
+---
+string[] names       # имена распознанных объектов, отсортированы по площади (убыв.)
+uint8[] ids          # id объектов (1..N), соответствуют names
+float64[] areas_px   # площадь blob в пикселях
+geometry_msgs/PoseStamped[] targets  # 3D-позиции в camera_head_link
+bool selected_ok     # true, если выбранная цель найдена и опубликована в /focus/target
+string message       # человекочитаемый статус

@@ -29,7 +29,7 @@ ros2 launch focus_tracking focus.launch.py source:=both hand:=right
 ros2 run focus_tracking focus_controller_node --ros-args -p use_sim_time:=true -p source:=hand
 ros2 run focus_tracking hand_tracker_node     --ros-args -p use_sim_time:=true -p hand:=left
 ros2 run focus_tracking object_detector_node.py --ros-args -p use_sim_time:=true \
-  -p "target_hsv:=[170,100,100,10,255,255]"   # красный blob
+  -p auto_select:=false   # цель публикуется только по сервису /focus/detect
 ```
 
 Управление на лету:
@@ -38,6 +38,22 @@ ros2 run focus_tracking object_detector_node.py --ros-args -p use_sim_time:=true
 ros2 service call /focus/set_mode std_srvs/srv/SetBool "{data: true}"    # ACTIVE / false = IDLE
 ros2 service call /focus/set_hand std_srvs/srv/SetBool "{data: true}"    # true=правая, false=левая
 ```
+
+Ручной список объектов и фокусировка по id/названию (сервис `/focus/detect`, srv `DetectObjects`):
+
+```bash
+# список всех обнаруженных объектов (id, цвет, площадь, глубина) — ничего не публикует
+ros2 service call /focus/detect focus_tracking/srv/DetectObjects
+
+# сфокусироваться на объекте по названию цвета
+ros2 service call /focus/detect focus_tracking/srv/DetectObjects "{select_name: red}"
+
+# ...или по id из списка выше
+ros2 service call /focus/detect focus_tracking/srv/DetectObjects "{select_id: 3}"
+```
+
+Именованные HSV-окна цветов задаются параметром `colors` (плоский список
+`name,h_lo,s_lo,v_lo,h_hi,s_hi,v_hi ...`) в `config/focus_params.yaml`.
 
 Параметры (deadzone, веса both-режима, лимиты, HSV-окно) — в
 [config/focus_params.yaml](config/focus_params.yaml). Требуется `bodyctrl_msgs`

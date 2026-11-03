@@ -1,0 +1,30 @@
+# focus_tracking — параметры по умолчанию (загружается launch-файлом)
+focus_controller_node:
+  ros__parameters:
+    source: object          # object | hand | both
+    publish_rate_hz: 20.0
+    yaw_limit: 1.5          # рад; физический предел head_yaw [-1.57, 1.57]
+    pitch_limit: 0.44       # рад; физический предел head_pitch [-0.44, 0.44]
+    deadzone_px: 20.0       # не дёргаемся, если ошибка цели < 20 px
+    smoothing: 0.5          # LPF: tgt = a*new + (1-a)*old
+    target_timeout_s: 1.0   # цель потеряна -> нейтраль
+    weight_object: 1.0      # режим both: вес цели-объекта
+    weight_hand: 0.3        # режим both: вес цели-руки
+    hand_offset_px_x: 150.0 # руку держим в нижнем правом квадранте кадра
+    hand_offset_px_y: 100.0
+
+hand_tracker_node:
+  ros__parameters:
+    camera_frame: camera_head_link
+    hand: right             # left | right (переключается сервисом /focus/set_hand)
+    rate_hz: 50.0
+    z_near: 0.15
+
+object_detector_node:
+  ros__parameters:
+    # HSV-окно цели. Примеры: красный [0,100,100,10,255,255] или
+    # огибающий тон [170,100,100,10,255,255]; синий [100,100,80,130,255,255]
+    target_hsv: [170.0, 100.0, 100.0, 10.0, 255.0, 255.0]
+    min_area: 300.0
+    depth_window: 9
+    max_range_m: 5.5

@@ -3,3 +3,7 @@
 ![prev](robot001000.png)
 
 Только разбираемся с репозиторием
+
+## Свои пакеты
+
+- [`focus_tracking/`](focus_tracking) — фокусировка головы на объектах / руках / обоих сразу (HSV+depth детектор, TF2 hand-tracker, контроллер c deadzone/LPF). Математика и архитектура: [docs/FOCUS_TRACKING.md](docs/FOCUS_TRACKING.md).

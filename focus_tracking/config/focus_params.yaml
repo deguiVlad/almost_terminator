@@ -31,4 +31,7 @@ object_detector_node:
     min_area: 300.0
     depth_window: 9
     max_range_m: 5.5
-    auto_select: true       # false — цел публикацию только по сервису /focus/detect
+    auto_select: true       # false — цель публикуется только по сервису /focus/detect
+    # Sticky ID: id присваивается в порядке обнаружения и закрепляется за объектом.
+    match_radius_m: 0.15  # порог сопоставления blob с существующим id, м
+    ttl_s: 5.0            # держать id без обнаружения, с (номера не переиспользуются)

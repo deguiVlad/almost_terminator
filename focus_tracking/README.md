@@ -55,6 +55,13 @@ ros2 service call /focus/detect focus_tracking/srv/DetectObjects "{select_id: 3}
 Именованные HSV-окна цветов задаются параметром `colors` (плоский список
 `name,h_lo,s_lo,v_lo,h_hi,s_hi,v_hi ...`) в `config/focus_params.yaml`.
 
+**Sticky ID:** id присваивается объекту в порядке обнаружения (первый новый
+blob → id=1, следующий → id=2, ...) и закрепляется за ним навсегда — никакой
+пересортировки по площади и смещения номеров между кадрами нет. Соответствие
+blob ↔ объект держится nearest-neighbour сопоставлением 3D-позиции (порог
+`match_radius_m`, по умолчанию 0.15 м); при пропаже дольше `ttl_s` (5 с) слот
+освобождается, но занятые номера не переиспользуются.
+
 Параметры (deadzone, веса both-режима, лимиты, HSV-окно) — в
 [config/focus_params.yaml](config/focus_params.yaml). Требуется `bodyctrl_msgs`
 из контейнера симулятора и работающий `robot_state_publisher` (в симе запущен).

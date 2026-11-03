@@ -17,6 +17,15 @@ YOLO не нужен, хватает HSV-детектора + глубины (64
   - select_name='red' | select_id=N -> публикует выбранную цель в /focus/target
     (режим авто-выбора самого большого blob при этом отключается).
 
+Идентификация объектов (sticky IDs):
+  id присваивается в ПОРЯДКЕ ОБНАРУЖЕНИЯ и закрепляется за объектом навсегда:
+  первый замеченный объект получает id=1, следующий новый — id=2 и т.д.
+  Никакой пересортировки по площади и смещения номеров между кадрами нет.
+  Соответчик связывает blob предыдущего кадра с новым по близости проекции
+  цели к прошлому положению (порог match_radius_m, по умолчанию 0.15 м); если
+  объект пропадает из кадра дольше ttl_s (5 с), его slot освобождается, но
+  занятые ранее номера другим объектам НЕ передаются (следующий id = max+1).
+
 Интерфейсы:
   ВХОД  /cam_head/color/image_raw   sensor_msgs/Image (rgb8)
   ВХОД  /cam_head/depth/image_raw   sensor_msgs/Image (16UC1, мм, выровнена по color)
@@ -26,6 +35,8 @@ YOLO не нужен, хватает HSV-детектора + глубины (64
   ПАРАМЕТР colors                   dict имя->HSV окно {name:[h_lo,s_lo,v_lo,h_hi,s_hi,v_hi]}
   ПАРАМЕТР min_area                 минимальная площадь blob в пикселях (по умолчанию 300)
   ПАРАМЕТР auto_select              true — публиковать самый большой blob сам (без сервиса)
+  ПАРАМЕТР match_radius_m           порог сопоставления blob с существующим id, м
+  ПАРАМЕТР ttl_s                    сколько секунд держать id без обнаружения
 
 Запуск:
   ros2 run focus_tracking object_detector_node --ros-args -p use_sim_time:=true \
@@ -67,11 +78,15 @@ class ObjectDetectorNode(Node):
         self.declare_parameter("depth_window", 9)
         self.declare_parameter("max_range_m", 5.5)   # depth==0 => нет данных (>6 м)
         self.declare_parameter("auto_select", True)
+        self.declare_parameter("match_radius_m", 0.15)
+        self.declare_parameter("ttl_s", 5.0)
 
         self.min_area = float(self.get_parameter("min_area").value)
         self.dwin = int(self.get_parameter("depth_window").value)
         self.max_range = float(self.get_parameter("max_range_m").value)
         self.auto_select = bool(self.get_parameter("auto_select").value)
+        self.match_r = float(self.get_parameter("match_radius_m").value)
+        self.ttl = float(self.get_parameter("ttl_s").value)
 
         flat = self.get_parameter("colors").value
         if flat:
@@ -85,6 +100,10 @@ class ObjectDetectorNode(Node):
         self.fx = self.fy = self.cx = self.cy = None
         self.last_frame = None       # (color_msg, depth_msg) — последний синхронизированный кадр
         self.selected = None         # (kind, value) выбор оператора: ('name', s) | ('id', n)
+        # sticky-ID таблица: id -> {'name','x','y','z','stamp'}; id закрепляется
+        # за объектом от первого обнаружения до истечения ttl, не перенумеровывается
+        self.tracks = {}
+        self.next_id = 1             # monotone counter: освобождённые номера НЕ переиспользуются
 
         self.pub = self.create_publisher(PoseStamped, "/focus/target", 10)
 
@@ -126,17 +145,25 @@ class ObjectDetectorNode(Node):
         if self.auto_select and self.selected is None and self.fx is not None:
             objs = self.detect(color, depth)
             if objs:
-                self.publish_target(objs[0]["pose"])
+                # самый большой blob; id у него sticky — не «прыгает» между кадрами
+                target = max(objs, key=lambda o: o["area"])
+                self.publish_target(target["pose"])
 
     # -------------------------------------------------------------- детекция
     def detect(self, color: Image, depth: Image):
-        """Список объектов [{name,id,area,u,v,depth,d_x,y,z,pose}] по всем цветам."""
+        """Список объектов [{name,id,area,u,v,depth,x,y,z,pose}] по всем цветам.
+
+        id — sticky: присваивается в порядке обнаружения и закрепляется за
+        объектом (nearest-neighbour сопоставление с tracks), без пересортировки
+        по площади и без смещения номеров между кадрами.
+        """
         bgr = self._to_np(color)[:, :, ::-1].copy()          # rgb8 -> bgr для OpenCV
         hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
         d_img = self._to_np(depth)[:, :, 0]
         w = self.dwin // 2
+        now = color.header.stamp.sec + color.header.stamp.nanosec * 1e-9
 
-        out, next_id = [], 1
+        raw = []                                             # blob'ы текущего кадра
         for name, win in self.colors.items():
             h_lo, s_lo, v_lo, h_hi, s_hi, v_hi = win
             if h_lo <= h_hi:
@@ -169,21 +196,40 @@ class ObjectDetectorNode(Node):
             # обратная проекция pinhole: пиксель + глубина -> 3D в camera_head_link
             x = (u - self.cx) * d / self.fx
             y = (v - self.cy) * d / self.fy
+            raw.append(dict(name=name, area=area, u=u, v=v, depth=d, x=x, y=y, z=d))
 
+        # ---------- sticky-ID соответствие (greedy nearest-neighbour) ----------
+        used_ids, out = set(), []
+        for o in raw:
+            best_id, best_d2 = None, self.match_r ** 2
+            for tid, tr in self.tracks.items():
+                if tid in used_ids:
+                    continue
+                d2 = (tr["x"] - o["x"]) ** 2 + (tr["y"] - o["y"]) ** 2 \
+                     + (tr["z"] - o["z"]) ** 2
+                if d2 < best_d2:
+                    best_id, best_d2 = tid, d2
+            if best_id is None:                      # новый объект: id по порядку обнаружения
+                best_id = self.next_id
+                self.next_id += 1
+            used_ids.add(best_id)
+            o["id"] = best_id
+            self.tracks[best_id] = {"name": o["name"], "x": o["x"],
+                                    "y": o["y"], "z": o["z"], "stamp": now}
+
+        # ttl: объекты, не видимые дольше ttl_s, освобождают slot (номера — навсегда)
+        for tid in [t for t, tr in self.tracks.items() if now - tr["stamp"] > self.ttl]:
+            del self.tracks[tid]
+
+        for o in sorted(raw, key=lambda r: r["id"]):   # стабильный порядок: по id
             ps = PoseStamped()
             ps.header.stamp = color.header.stamp
             ps.header.frame_id = "camera_head_link"
-            ps.pose.position.x, ps.pose.position.y, ps.pose.position.z = x, y, d
-
-            yaw = math.atan2(x, d)
-            pitch = math.atan2(-y, math.hypot(x, d))
-            out.append(dict(name=name, id=next_id, area=area, u=u, v=v,
-                            depth=d, x=x, y=y, z=d, pose=ps, yaw=yaw, pitch=pitch))
-            next_id += 1
-
-        out.sort(key=lambda o: -o["area"])          # id присваиваем после сортировки
-        for i, o in enumerate(out):
-            o["id"] = i + 1
+            ps.pose.position.x, ps.pose.position.y, ps.pose.position.z = o["x"], o["y"], o["z"]
+            o["pose"] = ps
+            o["yaw"] = math.atan2(o["x"], o["z"])
+            o["pitch"] = math.atan2(-o["y"], math.hypot(o["x"], o["z"]))
+            out.append(o)
         return out
 
     # -------------------------------------------------------------- сервис
@@ -208,7 +254,9 @@ class ObjectDetectorNode(Node):
         elif request.select_id:
             sel = next((o for o in objs if o["id"] == request.select_id), None)
             if sel is None:
-                response.message = f"id {request.select_id} не найден (1..{len(objs)})"
+                known = sorted(self.tracks) or [o["id"] for o in objs]
+                response.message = (f"id {request.select_id} сейчас не виден "
+                                    f"(закреплённые id: {known})")
         else:
             response.message = (f"обнаружено {len(objs)} шт: " +
                                 ", ".join(f"{o['id']}:{o['name']}({o['area']:.0f}px,"

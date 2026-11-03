@@ -114,34 +114,45 @@ def fk_tcp(model: ArmModel, q):
     return pos, np.array([quat[3], quat[0], quat[1], quat[2]])
 
 
+def joint_frames(model: ArmModel, q):
+    """Кадры joints «до» их собственного поворота: F_i = T_{i-1} @ origin_i.
+
+    Для i-го сустава: позиция оси o_i = F_i[:3,3], направление оси
+    z_i = F_i[:3,:3] @ axis_i (URDF: origin применяется к parent frame,
+    затем вращение вокруг axis в этой же рамке).
+    """
+    q = np.asarray(q, dtype=float)
+    frames = []
+    T = np.eye(4)
+    for js, qi in zip(model.joints, q):
+        F = T @ _tmat(js.origin_xyz, js.origin_rpy)
+        frames.append(F.copy())
+        M = np.eye(4)
+        M[:3, :3] = _rot_axis(js.axis, qi)
+        T = F @ M
+    return frames
+
+
 def geometric_jacobian(model: ArmModel, q, point=None):
-    """Якобиан 6x7 (линейная скорость точки + угловая скорость, оси world/base).
+    """Якобиан 6x7 (линейная скорость точки + угловая скорость, оси base/world).
 
     point — точка, для которой считается линейная часть (по умолчанию — TCP).
+    Реализация каноническая: dp/dq_i = z_i x (p - o_i), dR/dq_i = z_i.
     """
     Ts = chain_transforms(model, q)
     if point is None:
         p = (Ts[-1] @ np.append(model.tcp_offset, 1.0))[:3]
     else:
         p = np.asarray(point, dtype=float)
+    Fs = joint_frames(model, q)
     J = np.zeros((6, len(model.joints)))
-    prev = np.eye(4)
     for i, js in enumerate(model.joints):
-        Ti = Ts[i]
-        # позиция и ось i-го сустава в базовой системе
-        z_i = prev @ np.append(js.axis, 0.0)
-        z_i = z_i[:3]
-        o_i = prev @ np.append(js.origin_xyz, 1.0)
-        # применяем origin ПЕРЕД поворотом: позиция сустава = пред-матрица * origin
-        Pprev = np.eye(4)
-        if i > 0:
-            Pprev = Ts[i - 1]
-        o_i = (Pprev @ np.append(js.origin_xyz, 1.0))[:3]
-        z_i = (Pprev[:3, :3] @ np.asarray(js.axis, dtype=float))
+        F = Fs[i]
+        o_i = F[:3, 3]
+        z_i = F[:3, :3] @ np.asarray(js.axis, dtype=float)
         r = p - o_i
         J[:3, i] = np.cross(z_i, r)
         J[3:, i] = z_i
-        prev = Ti
     return J
 
 
@@ -163,14 +174,19 @@ def clip_to_limits(q, model: ArmModel, margin=0.0):
 
 
 def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
-           tol_rot=2e-2, damping=0.05, step_scale=1.0, weight=None):
+           tol_rot=2e-2, damping=0.05, step_scale=1.0, weight=None,
+           barrier=None, null_gain=0.0, q_prefer=None):
     """Итеративная IK: Levenberg-Marquardt / Damped Least Squares.
 
     Учитывает пределы суставов (clip) и приоритетные веса сочленений.
+    Опционально:
+      barrier   — callable(q) -> dq(7,), барьерный градиент (защита от стола);
+      null_gain/q_prefer — подтяжка в нуль-пространстве к предпочтительной
+                  позе (использует 7-ю степень свободы, позу не меняет).
     Возвращает (q, success, err_norm_history).
     """
     q = np.asarray(q_init, dtype=float).copy()
-    W = np.eye(7) if weight is None else np.diag(weight)
+    W = np.eye(len(model.joints)) if weight is None else np.diag(weight)
     hist = []
     for _ in range(max_iter):
         T, _ = fk(model, q)
@@ -184,6 +200,13 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
         JW = J @ W
         A = JW @ J.T + (damping ** 2) * np.eye(6)
         dq = W @ J.T @ np.linalg.solve(A, e)
+        if barrier is not None:
+            dq = dq + barrier(q)
+        if null_gain > 0.0 and q_prefer is not None:
+            # нуль-пространственная проекция: не влияет на позу TCP
+            Jp_inv = W @ J.T @ np.linalg.inv(A)
+            N = np.eye(len(model.joints)) - Jp_inv @ J
+            dq = dq + null_gain * (N @ (np.asarray(q_prefer) - q))
         q_new = clip_to_limits(q + step_scale * dq, model, margin=1e-4)
         if np.allclose(q_new, q, atol=1e-12):
             # упёрся в пределы и дальше не идёт — попробуй уменьшить шаг
@@ -195,6 +218,26 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
     e = pose_error(T, T_des44)
     ok = np.linalg.norm(e[:3]) < tol_pos and np.linalg.norm(e[3:]) < tol_rot
     return q, ok, hist
+
+
+def ik_multi_seed(model: ArmModel, T_des44, seeds, **kw):
+    """Перебор стартовых поз (боремся с локальными минимумами DLS).
+
+    Берём решение с минимальной ошибкой; при равенстве — ближайшее к seeds[0]
+    (обычно текущая измеренная поза => минимум движения).
+    Возвращает (q, ok, err_pos, err_rot).
+    """
+    best, best_key = None, None
+    for s in seeds:
+        q, ok, hist = ik_dls(model, T_des44, s, **kw)
+        T, _ = fk(model, q)
+        e = pose_error(T, T_des44)
+        key = (not ok, float(np.linalg.norm(e[:3])) * 10 + float(np.linalg.norm(e[3:])),
+               float(np.linalg.norm(q - np.asarray(seeds[0]))))
+        if best_key is None or key < best_key:
+            best, best_key = (q, ok, float(np.linalg.norm(e[:3])),
+                              float(np.linalg.norm(e[3:]))), key
+    return best
 
 
 def solve_pose_xy_zyaw(model: ArmModel, target_pos, yaw_deg=-90.0, roll_deg=0.0, pitch_deg=0.0):
@@ -258,13 +301,14 @@ def load_arm_model(path=None, side="right"):
 
 
 def make_default_arm(side: str) -> ArmModel:
-    """Шаблонная модель руки. Оси и смещения соответствуют типичной сборке
-    tiangong_pro URDF: плечо в 3 осях (X,Y,X...), локоть 2 оси, запястье 2 оси.
+    """Шаблонная модель руки (кронштейн->плечо->локоть->запястье, DH-подобная форма).
 
-    ЗАМЕНИТЬ на точные значения из URDF перед боём (см. export-скрипт).
+    При q=0 кисть смотрит вперёд (+X базы), звенья идут вдоль +Z предыдущей рамки.
+    Оси и длины — типичные для tiangong_pro URDF; ПЕРЕД БОЕМ перегенерировать из
+    фактического URDF: python3 scripts/export_kinematics_from_urdf.py \
+        --urdf <robot.urdf> --out config/arms.json
     """
     s = 1.0 if side == "left" else -1.0
-    L = side[0].upper()  # 'L'/'R' в именах суставов робота: shoulder_pitch_l_joint
     tag = "l" if side == "left" else "r"
     y_sh = 0.20 * s       # боковое смещение плеча от средней линии (м) — из URDF
     z_sh = 1.28           # высота плеча над pelvis (м) — из URDF

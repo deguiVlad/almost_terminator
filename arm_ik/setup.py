@@ -1,4 +1,5 @@
-from setuptools import setup
+import os
+from setuptools import setup  # glob нужен при включении srv: , glob
 
 package_name = "arm_ik"
 

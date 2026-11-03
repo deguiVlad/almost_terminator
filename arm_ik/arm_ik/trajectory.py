@@ -13,7 +13,8 @@ import numpy as np
 def joint_space_profile(q0, q1, v_max=0.8, a_max=0.4, dt=0.02):
     """Trapezoidal профиль в пространстве суставов, синхронизированный по всем осям.
 
-    Гарантирует |dq/dt| <= v_max на каждой дискретной точке профиля.
+    Гарантирует |dq/dt| <= v_max на каждой дискретной точке профиля (скорость
+    конечных разностей не превышает крейсерской скорости трапеции).
     Возвращает массив (N, n_joints), включая q0 и q1.
     """
     q0 = np.asarray(q0, float)
@@ -48,4 +49,9 @@ def joint_space_profile(q0, q1, v_max=0.8, a_max=0.4, dt=0.02):
             pos[k] = s
         traj[:, i] = q0[i] + sign * pos
         traj[-1, i] = q1[i]
+    # страховка: если из-за квантования dt где-то превысили лимит — растягиваем
+    v = np.abs(np.diff(traj, axis=0)).max() / dt
+    if v > v_max:
+        scale = min(1.25, v / v_max)       # одна итерация обычно достаточна
+        return joint_space_profile(q0, q1, v_max=v_max / scale, a_max=a_max, dt=dt)
     return traj

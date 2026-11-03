@@ -1,95 +1,161 @@
 # -*- coding: utf-8 -*-
-"""ROS 2 сервис-нода IK для обеих рук TienKung (7 DOF на руку).
+"""ROS 2 узел обратной кинематики обеих рук TienKung 2.0 Pro (7 DOF на руку).
 
 Интерфейсы:
-  * сервис ~/solve (arm_ik/srv/SolveIK): цель PoseStamped в рамке pelvis + side
-    -> решённые углы суставов (для отладки/планирования, без движения);
-  * подписка /arm_ik/goal_left, /arm_ik/goal_right (geometry_msgs/PoseStamped):
-    полученная цель сразу исполняется — IK + траектория + cmd_pos с замыканием
-    контура по /joint_states (недолёт ПД-приводов до 15 % компенсируется);
-  * публикация /arm_ik/wrist_{left,right}_pose (PoseStamped) — текущая поза TCP
-    по FK от измеренных суставов (полезно для RViz и верхнего уровня).
+  ВХОД:
+    * /arm_ik/goal_left, /arm_ik/goal_right   (geometry_msgs/PoseStamped)
+        цель для TCP кисти; рамка header.frame_id может быть любой из дерева TF
+        (pelvis, camera_head_link, ...) — узел сам перенесёт её в pelvis через TF2.
+        Рамка pelvis/пустая — без переноса («ориентация относительно корпуса»).
+    * ~/solve                                  (arm_ik/srv/SolveIK)
+        решить IK без движения (для планирования/отладки верхним уровнем).
+        Сервис появляется только если пакет собран с rosidl-генерацией srv
+        (см. README); без него узел полностью работает от топиков целей.
+  ВЫХОД:
+    * /arm/cmd_pos            (bodyctrl_msgs/CmdSetMotorPosition) — команды моторов
+                              11..17 (левая) и 21..27 (правая), spd <= 0.8 рад/с.
+    * /arm_ik/wrist_{left,right}_pose (PoseStamped, рамка pelvis) — текущая поза
+                              TCP по FK от /joint_states (видно в RViz, полезно
+                              верхнему уровню как «где сейчас кисть»).
+    * /arm_ik/{left,right}/status (std_msgs/String, JSON) — фаза контура:
+                              idle | traj | fine | reached | failed + ошибки.
 
-Коллизия со столом: TableGuard (полуплоскость z=h_table в прямоугольнике стола),
-мягкий барьер в IK + проверка каждой точки траектории; при конфликте — повторный
-заход с «вершинным» waypoint над столом.
+Конвейер исполнения цели (подробно — README пакета):
+  1. TF-перенос цели в pelvis, клампинг выше стола (TableGuard);
+  2. IK: DLS из текущей измеренной позы + сиды-альтернативы (multi-seed),
+     мягкий барьер от стола внутри шага IK;
+  3. траектория: trapezoidal профиль |dq/dt| <= 0.8 рад/с, валидация каждой
+     точки на коллизию со столом; при конфликте — заход через waypoint над
+     столом (две фазы профиля);
+  4. исполнение на rate_hz: пачка SetMotorPosition в /arm/cmd_pos;
+  5. фаза «fine»: замыкание контура по /joint_states — P-коррекция недолёта
+     ПД-приводов (до 15 % по docs/INTERFACES.md) шагом dq = J+ e, клип
+     ±0.1 рад/цикл (рекомендация FOCUS_TRACKING.md §3), пока ошибка позы
+     не войдёт в tol_pos/tol_rot.
+
+Обе руки исполняются независимыми станми в одном узле: топик команд общий,
+но ID моторов не пересекаются.
 """
+import json
 import math
 
 import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped
-from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.node import Node
 from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import JointState
+from std_msgs.msg import String
+
+import tf2_ros
 
 from bodyctrl_msgs.msg import CmdSetMotorPosition, SetMotorPosition
 
-from arm_ik.kinematics import (ArmModel, fk, pose_error, ik_dls, clip_to_limits,
-                               load_arm_model)
+from arm_ik.kinematics import (fk, fk_tcp, geometric_jacobian, ik_dls,
+                               ik_multi_seed, clip_to_limits, load_arm_model,
+                               pose_error, _tmat)
 from arm_ik.collision import TableGuard
 from arm_ik.trajectory import joint_space_profile
-from arm_ik.srv import SolveIK
+
+try:  # srv-кодген включается только если пакет собран с rosidl (см. README)
+    from arm_ik.srv import SolveIK
+    HAVE_SRV = True
+except ImportError:
+    HAVE_SRV = False
 
 
-def pose_to_T(pose_stamped_msg_in_base):
-    p = pose_stamped_msg_in_base.pose.position
-    q = pose_stamped_msg_in_base.pose.orientation
+def pose_to_T(msg_pose):
+    p = msg_pose.position
+    q = msg_pose.orientation
     T = np.eye(4)
     T[:3, :3] = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
     T[:3, 3] = [p.x, p.y, p.z]
     return T
 
 
+def T_to_posemsg(T):
+    ps = PoseStamped()
+    pos = T[:3, 3]
+    qx, qy, qz, qw = Rotation.from_matrix(T[:3, :3]).as_quat()
+    ps.pose.position.x, ps.pose.position.y, ps.pose.position.z = pos[0], pos[1], pos[2]
+    ps.pose.orientation.x, ps.pose.orientation.y = qx, qy
+    ps.pose.orientation.z, ps.pose.orientation.w = qz, qw
+    return ps
+
+
+class ArmExecutor:
+    """Машинерия исполнения одной руки: traj -> fine -> reached."""
+    IDLE, TRAJ, FINE, REACHED, FAILED = "idle", "traj", "fine", "reached", "failed"
+
+    def __init__(self, model):
+        self.model = model
+        self.state = self.IDLE
+        self.traj = None
+        self.idx = 0
+        self.T_des = np.eye(4)
+        self.fine_cycles = 0
+        self.last_err = (float("nan"), float("nan"))
+
+
 class ArmIKNode(Node):
     def __init__(self):
         super().__init__("arm_ik_node")
-        # --- параметры ---
+        # ---------------- параметры ----------------
         self.declare_parameter("use_sim_time", True)
-        self.declare_parameter("model_path", "")          # config/arms.json (из URDF)
+        self.declare_parameter("model_path", "")       # config/arms.json (из URDF)
+        self.declare_parameter("base_frame", "pelvis")
         self.declare_parameter("rate_hz", 50.0)
-        self.declare_parameter("spd_limit", 0.8)          # жёсткий лимит документации
+        self.declare_parameter("spd_limit", 0.8)       # жёсткий лимит документации
         self.declare_parameter("a_max", 0.4)
-        self.declare_parameter("tol_pos", 0.01)           # м
-        self.declare_parameter("tol_rot", 0.05)           # рад
-        self.declare_parameter("kp", 0.6)                 # коррекция недолёта ПД
-        self.declare_parameter("h_table", 0.9)            # высота стола над pelvis, м
+        self.declare_parameter("tol_pos", 0.01)        # м
+        self.declare_parameter("tol_rot", 0.05)        # рад
+        self.declare_parameter("kp", 0.6)              # коррекция недолёта ПД
+        self.declare_parameter("fine_max_cycles", 300) # страховка от бесконечной fine
+        self.declare_parameter("h_table", 0.9)         # высота стола над pelvis, м
         self.declare_parameter("table_x0", 0.35)
         self.declare_parameter("table_x1", 1.2)
         self.declare_parameter("table_y_half", 1.0)
         self.declare_parameter("table_margin", 0.02)
         self.declare_parameter("enable_table_guard", True)
+        self.declare_parameter("waypoint_lift", 0.25)  # заход сверху, м (FOCUS_TRACKING §Шаг2)
+        self.declare_parameter("n_seeds", 4)           # альтернативных стартов IK
+        self.declare_parameter("tcp_offset", "")         # "x,y,z" поверх arms.json (переопределить кончик)
 
         mp = self.get_parameter("model_path").value or None
-        self.models = {
-            "left": load_arm_model(mp, "left"),
-            "right": load_arm_model(mp, "right"),
-        }
-        tg = TableGuard(self.get_parameter("h_table").value,
-                        self.get_parameter("table_x0").value,
-                        self.get_parameter("table_x1").value,
-                        self.get_parameter("table_y_half").value,
-                        self.get_parameter("table_margin").value) \
+        self.base_frame = self.get_parameter("base_frame").value
+        self.models = {"left": load_arm_model(mp, "left"),
+                       "right": load_arm_model(mp, "right")}
+        for m in self.models.values():
+            m.base_frame = self.base_frame
+        tof = self.get_parameter("tcp_offset").value
+        if tof:
+            v = [float(t) for t in str(tof).split(",")]
+            for m in self.models.values():
+                m.tcp_offset = np.array(v)
+
+        self.guard = TableGuard(self.get_parameter("h_table").value,
+                                self.get_parameter("table_x0").value,
+                                self.get_parameter("table_x1").value,
+                                self.get_parameter("table_y_half").value,
+                                self.get_parameter("table_margin").value) \
             if self.get_parameter("enable_table_guard").value else None
-        self.guard = tg
 
         self.rate_hz = float(self.get_parameter("rate_hz").value)
-        self.spd = float(self.get_parameter("spd_limit").value)
+        self.spd = min(float(self.get_parameter("spd_limit").value), 0.8)  # перестраховка
         self.a_max = float(self.get_parameter("a_max").value)
         self.tol_pos = float(self.get_parameter("tol_pos").value)
         self.tol_rot = float(self.get_parameter("tol_rot").value)
         self.kp = float(self.get_parameter("kp").value)
+        self.fine_max = int(self.get_parameter("fine_max_cycles").value)
+        self.lift = float(self.get_parameter("waypoint_lift").value)
+        self.n_seeds = int(self.get_parameter("n_seeds").value)
 
-        # --- состояние ---
+        # ---------------- состояние ----------------
         self.joints = {}
-        self.exec_ = {}   # side -> dict(traj=..., idx=..., T_des=..., done=cb)
-        for s in ("left", "right"):
-            q0 = np.zeros(7)
-            self.exec_[s] = {"traj": None, "idx": 0, "T_des": np.eye(4),
-                             "q_hold": q0.copy()}
+        self.exec = {s: ArmExecutor(m) for s, m in self.models.items()}
 
-        # --- ROS интерфейсы ---
+        # ---------------- ROS интерфейсы ----------------
         self.cmd_pub = self.create_publisher(CmdSetMotorPosition, "/arm/cmd_pos", 10)
         self.create_subscription(JointState, "/joint_states", self.on_js, 10)
         self.create_subscription(PoseStamped, "/arm_ik/goal_left",
@@ -98,84 +164,137 @@ class ArmIKNode(Node):
                                  lambda m: self.on_goal("right", m), 10)
         self.pose_pubs = {
             "left": self.create_publisher(PoseStamped, "/arm_ik/wrist_left_pose", 10),
-            "right": self.create_publisher(PoseStamped, "/arm_ik/wrist_right_pose", 10),
-        }
+            "right": self.create_publisher(PoseStamped, "/arm_ik/wrist_right_pose", 10)}
+        self.status_pubs = {
+            "left": self.create_publisher(String, "/arm_ik/left/status", 10),
+            "right": self.create_publisher(String, "/arm_ik/right/status", 10)}
+
+        # TF2: перенос произвольной рамки цели в base_frame
+        self.tf_buffer = tf2_ros.Buffer()
+        tf2_ros.TransformListener(self.tf_buffer, self)
+
         cbg = ReentrantCallbackGroup()
-        self.srv = self.create_service(SolveIK, "~/solve", self.solve_srv,
-                                       callback_group=cbg)
+        if HAVE_SRV:
+            self.create_service(SolveIK, "~/solve", self.solve_srv, callback_group=cbg)
         self.timer = self.create_timer(1.0 / self.rate_hz, self.step)
         self.get_logger().info(
-            f"arm_ik_node ready | models: {[m.tip_link for m in self.models.values()]} | "
-            f"table guard {'ON' if tg else 'OFF'} h={tg.h if tg else '-'}")
+            f"arm_ik_node ready | tips={[m.tip_link for m in self.models.values()]} | "
+            f"guard={'ON h=%.2f' % self.guard.h if self.guard else 'OFF'} | "
+            f"srv={'on' if HAVE_SRV else 'off (нет сгенерированного arm_ik.srv)'}")
 
-    # ------------------------------------------------------------------ helpers
+    # ------------------------------------------------------------ helpers
     def on_js(self, msg: JointState):
         self.joints.update(dict(zip(msg.name, msg.position)))
 
-    def q_meas(self, model: ArmModel):
+    def q_meas(self, model):
         return np.array([self.joints.get(n, 0.0) for n in model.names])
 
-    def make_cmd(self, model: ArmModel, q_target, spd=None):
-        msg = CmdSetMotorPosition()
+    def make_cmd(self, model, q_target, spd=None):
+        """Пачка команд моторов руки. Формат — как в docs/INTERFACES.md и hello_world:
+        CmdSetMotorPosition.cmds = [SetMotorPosition(name=ID, pos, spd, cur), ...]"""
         spd = self.spd if spd is None else spd
+        msg = CmdSetMotorPosition()
         msg.cmds = [SetMotorPosition(name=int(mid), pos=float(q), spd=float(spd), cur=1.0)
                     for mid, q in zip(model.ids, q_target)]
         return msg
 
-    # ------------------------------------------------------------------ goals
-    def on_goal(self, side: str, goal: PoseStamped):
+    def to_base_T(self, goal: PoseStamped):
+        """PoseStamped в любой TF-рамке -> матрица 4x4 в base_frame."""
+        fid = goal.header.frame_id
+        if fid in ("", self.base_frame, "base_link"):
+            return pose_to_T(goal.pose)
+        tfm = self.tf_buffer.lookup_transform(self.base_frame, fid,
+                                              rclpy.time.Time(),
+                                              timeout=rclpy.duration.Duration(seconds=0.5))
+        t = tfm.transform.translation
+        r = tfm.transform.rotation
+        T_bc = np.eye(4)
+        T_bc[:3, :3] = Rotation.from_quat([r.x, r.y, r.z, r.w]).as_matrix()
+        T_bc[:3, 3] = [t.x, t.y, t.z]
+        return T_bc @ pose_to_T(goal.pose)
+
+    def seed_poses(self, model, q_now):
+        """Текущая поза + несколько «типовых» поз — борьба с локальными минимумами DLS."""
+        seeds = [q_now.copy()]
+        home = clip_to_limits(np.zeros(7), model, margin=0.1)
+        seeds.append(home)
+        reach = np.array([-0.4, 0.3, 0.0, -0.9, 0.0, 0.2, 0.0])
+        if model.side == "left":
+            reach[1] = -reach[1]
+        seeds.append(clip_to_limits(reach, model, margin=0.05))
+        bent = np.array([-0.8, 0.5, 0.4, -1.6, 0.3, 0.4, 0.0])
+        if model.side == "left":
+            bent[1] = -bent[1]
+        seeds.append(clip_to_limits(bent, model, margin=0.05))
+        return seeds[: max(1, self.n_seeds)]
+
+    # ------------------------------------------------------------ goals
+    def on_goal(self, side, goal: PoseStamped):
+        ex = self.exec[side]
         model = self.models[side]
-        if goal.header.frame_id not in ("", "pelvis", "base_link", model.base_frame):
-            self.get_logger().warn(
-                f"[{side}] цель в рамке {goal.header.frame_id!r} — узел ожидает pelvis; "
-                f"перенесите через TF перед публикацией")
-        T_des = pose_to_T(goal)
-        # жёсткая страховка цели от стола
+        try:
+            T_des = self.to_base_T(goal)
+        except Exception as e:  # TF ещё не доступен
+            self.get_logger().error(f"[{side}] TF {self.base_frame}<-{goal.header.frame_id}: {e}")
+            return
         if self.guard is not None:
             T_des[:3, 3] = self.guard.clamp_target_above_table(T_des[:3, 3])
-        st = self.exec_[side]
-        st["T_des"] = T_des
-        q_meas = self.q_meas(model)
-        # 1) IK к цели из текущей измеренной позы
-        q_sol, ok, _ = ik_dls(model, T_des, q_init=q_meas, max_iter=200,
-                              tol_pos=self.tol_pos, tol_rot=self.tol_rot)
-        if not ok and self.guard is not None:
-            # 2) заход через вершину: waypoint над столом
-            wp = T_des.copy()
-            wp[:3, 3] = self.guard.clamp_target_above_table(wp[:3, 3] + np.array([0, 0, 0.25]))
-            q_wp, ok1, _ = ik_dls(model, wp, q_init=q_meas, max_iter=150)
-            q_sol2, ok2, _ = ik_dls(model, T_des, q_init=q_wp, max_iter=150)
-            if ok1 and ok2:
-                traj1 = joint_space_profile(q_meas, q_wp, self.spd, self.a_max, 1.0 / self.rate_hz)
-                traj2 = joint_space_profile(q_wp, q_sol2, self.spd, self.a_max, 1.0 / self.rate_hz)
-                st["traj"] = np.vstack([traj1[:-1], traj2])
-                st["idx"] = 0
-                self.get_logger().info(f"[{side}] IK через waypoint над столом")
-                return
-        if not ok:
-            self.get_logger().error(f"[{side}] IK не сошлась к цели — удерживаем текущую позу")
-            st["traj"] = None
-            return
-        # фильтрация траектории от коллизий со столом
-        if self.guard is not None:
-            bad = [i for i, qq in enumerate(joint_space_profile(q_meas, q_sol, self.spd, self.a_max, 1.0 / self.rate_hz))
-                   if self.guard.collides_with_table(model, qq)]
-            if bad:
-                self.get_logger().warn(f"[{side}] траектория пересекает стол ({len(bad)} точек) — стоп")
-                st["traj"] = None
-                return
-        st["traj"] = joint_space_profile(q_meas, q_sol, self.spd, self.a_max, 1.0 / self.rate_hz)
-        st["idx"] = 0
-        self.get_logger().info(
-            f"[{side}] IK решена: {len(st['traj'])} точек, ~{(len(st['traj'])-1)/self.rate_hz:.1f} c")
+        ex.T_des = T_des
+        q_now = self.q_meas(model)
 
-    # ------------------------------------------------------------------ service
+        barrier = None
+        if self.guard is not None:
+            barrier = lambda q: self.guard.table_cost_gradient(model, q, k=30.0)
+
+        # 1) IK: multi-seed DLS с барьером стола
+        seeds = self.seed_poses(model, q_now)
+        q_sol, ok, epos, erot = ik_multi_seed(
+            model, T_des, seeds, max_iter=250, tol_pos=self.tol_pos * 0.5,
+            tol_rot=self.tol_rot * 0.5, barrier=barrier)
+
+        dt = 1.0 / self.rate_hz
+        if ok and self.guard is not None:
+            traj = joint_space_profile(q_now, q_sol, self.spd, self.a_max, dt)
+            bad = any(self.guard.collides_with_table(model, qq) for qq in traj)
+        else:
+            bad = False
+
+        if ok and not bad:
+            ex.traj = joint_space_profile(q_now, q_sol, self.spd, self.a_max, dt)
+            ex.idx, ex.state, ex.fine_cycles = 0, ArmExecutor.TRAJ, 0
+            self.get_logger().info(
+                f"[{side}] IK решена: {len(ex.traj)} точек (~{(len(ex.traj)-1)/self.rate_hz:.1f} c)")
+            return
+
+        # 2) план Б: заход через waypoint строго над столом (две IK-фазы)
+        if self.guard is not None:
+            wp = T_des.copy()
+            wp[:3, 3] = self.guard.clamp_target_above_table(wp[:3, 3] + np.array([0.0, 0.0, self.lift]))
+            q_wp, ok1, _, _ = ik_multi_seed(model, wp, seeds, max_iter=200,
+                                            barrier=barrier)
+            q_fin, ok2, _, _ = ik_multi_seed(model, T_des, [q_wp] + seeds, max_iter=200,
+                                             barrier=barrier)
+            if ok1 and ok2:
+                t1 = joint_space_profile(q_now, q_wp, self.spd, self.a_max, dt)
+                t2 = joint_space_profile(q_wp, q_fin, self.spd, self.a_max, dt)
+                ex.traj = np.vstack([t1[:-1], t2])
+                ex.idx, ex.state, ex.fine_cycles = 0, ArmExecutor.TRAJ, 0
+                self.get_logger().info(
+                    f"[{side}] IK через waypoint над столом ({len(ex.traj)} точек)")
+                return
+
+        ex.state, ex.traj = ArmExecutor.FAILED, None
+        ex.last_err = (epos, erot)
+        self.get_logger().error(
+            f"[{side}] IK не сошлась (err pos={epos*100:.1f} см rot={erot:.2f} рад) — удержание")
+
+    # ------------------------------------------------------------ service
     def solve_srv(self, req, res):
         side = req.side if req.side in ("left", "right") else "right"
         model = self.models[side]
-        T_des = pose_to_T(req.goal)
-        q_init = self.q_meas(model) if not req.use_zero_seed else np.zeros(7)
-        q, ok, hist = ik_dls(model, T_des, q_init, max_iter=200)
+        T_des = pose_to_T(req.goal.pose)
+        q_init = np.zeros(7) if req.use_zero_seed else self.q_meas(model)
+        q, ok, hist = ik_dls(model, T_des, q_init, max_iter=250)
         res.success = bool(ok)
         res.joint_names = model.names
         res.positions = [float(v) for v in q]
@@ -183,49 +302,58 @@ class ArmIKNode(Node):
         res.final_error = float(hist[-1]) if hist else 1e9
         return res
 
-    # ------------------------------------------------------------------ control loop
+    # ------------------------------------------------------------ control loop
     def step(self):
         now = self.get_clock().now().to_msg()
         for side, model in self.models.items():
-            st = self.exec_[side]
+            ex = self.exec[side]
             q_meas = self.q_meas(model)
-            # публикация текущей позы TCP (FK от энкодеров)
-            ps = PoseStamped()
-            ps.header.frame_id = model.base_frame
+
+            # телеметрия: текущая поза TCP (FK от энкодеров)
+            ps = T_to_posemsg(fk(model, q_meas)[0] @ _tmat(model.tcp_offset, [0, 0, 0]))
+            ps.header.frame_id = self.base_frame
             ps.header.stamp = now
-            T, _ = fk(model, q_meas)
-            Tcp = T.copy()
-            from arm_ik.kinematics import _tmat
-            Tcp = Tcp @ _tmat(model.tcp_offset, [0, 0, 0])
-            ps.pose.position.x, ps.pose.position.y, ps.pose.position.z = Tcp[:3, 3]
-            qx, qy, qz, qw = Rotation.from_matrix(Tcp[:3, :3]).as_quat()
-            ps.pose.orientation.x, ps.pose.orientation.y = qx, qy
-            ps.pose.orientation.z, ps.pose.orientation.w = qz, qw
             self.pose_pubs[side].publish(ps)
 
-            if st["traj"] is None:
-                continue
-            i = st["idx"]
-            if i >= len(st["traj"]):
-                # фаза точного позиционирования: P-коррекция недолёта ПД-приводов
-                e = pose_error(fk(model, q_meas)[0], st["T_des"])
-                if np.linalg.norm(e[:3]) < self.tol_pos and np.linalg.norm(e[3:]) < self.tol_rot:
-                    st["traj"] = None
-                    self.get_logger().info(f"[{side}] цель достигнута (pos err {np.linalg.norm(e[:3])*100:.1f} см)")
-                    continue
-                from arm_ik.kinematics import geometric_jacobian
-                J = geometric_jacobian(model, q_meas)
-                A = J @ J.T + 0.05 ** 2 * np.eye(6)
-                dq = J.T @ np.linalg.solve(A, e)
-                dq = np.clip(dq, -0.1, 0.1)  # ≤ 0.1 рад/цикл как в FOCUS_TRACKING.md §4
-                q_new = clip_to_limits(q_meas + self.kp * dq, model, margin=1e-4)
-                st["traj"] = joint_space_profile(q_meas, q_new, min(self.spd, 0.3),
-                                                 self.a_max, 1.0 / self.rate_hz)
-                st["idx"] = 0
-                continue
-            q_ref = st["traj"][i]
-            self.cmd_pub.publish(self.make_cmd(model, q_ref))
-            st["idx"] += 1
+            if ex.traj is not None and ex.idx < len(ex.traj):
+                # фаза траектории: открытая петля по заранее просчитанному профилю
+                self.cmd_pub.publish(self.make_cmd(model, ex.traj[ex.idx]))
+                ex.idx += 1
+            elif ex.state == ArmExecutor.TRAJ:
+                ex.state = ArmExecutor.FINE  # профиль пройден -> дотягивание
+
+            if ex.state == ArmExecutor.FINE:
+                # фаза fine: замкнутый контур по /joint_states (недолёт ПД до 15 %)
+                e = pose_error(fk(model, q_meas)[0], ex.T_des)
+                ex.last_err = (float(np.linalg.norm(e[:3])), float(np.linalg.norm(e[3:])))
+                if ex.last_err[0] < self.tol_pos and ex.last_err[1] < self.tol_rot:
+                    ex.state = ArmExecutor.REACHED
+                    ex.traj = None
+                    self.get_logger().info(
+                        f"[{side}] цель достигнута: pos err {ex.last_err[0]*100:.1f} см, "
+                        f"rot err {ex.last_err[1]:.3f} рад")
+                elif ex.fine_cycles >= self.fine_max:
+                    ex.state = ArmExecutor.FAILED
+                    ex.traj = None
+                    self.get_logger().warn(f"[{side}] fine-фаза исчерпала {ex.fine_max} циклов")
+                else:
+                    J = geometric_jacobian(model, q_meas)
+                    A = J @ J.T + 0.05 ** 2 * np.eye(6)
+                    dq = J.T @ np.linalg.solve(A, e)
+                    dq = np.clip(dq, -0.1, 0.1)          # ≤ 0.1 рад/цикл (FOCUS_TRACKING §3)
+                    q_new = clip_to_limits(q_meas + self.kp * dq, model, margin=1e-4)
+                    ex.traj = joint_space_profile(q_meas, q_new,
+                                                  min(self.spd, 0.3), self.a_max,
+                                                  1.0 / self.rate_hz)
+                    ex.idx = 0
+                    ex.fine_cycles += 1
+
+            st = {"side": side, "state": ex.state,
+                  "err_pos_m": round(ex.last_err[0], 4) if ex.last_err[0] == ex.last_err[0] else None,
+                  "err_rot_rad": round(ex.last_err[1], 4) if ex.last_err[1] == ex.last_err[1] else None}
+            msg = String()
+            msg.data = json.dumps(st)
+            self.status_pubs[side].publish(msg)
 
 
 def main():

@@ -164,7 +164,8 @@ q* = (w_obj·q_obj + w_hand·q_hand) / (w_obj + w_hand)
                       ┌──────────────────────────┐
  /cam_head/{color,    │ object_detector_node     │──▶ /focus/target   ──┐
  depth}/image_raw ───▶│ Python: rclpy+cv2+numpy  │   PoseStamped        │
- /sim/task            └──────────────────────────┘   (camera_head_link) │
+ /sim/task            │                          │──▶ /focus/detection/viz
+                      └──────────────────────────┘   (Image, контур+id+центр)
                       ┌──────────────────────────┐                       ▼
  /tf ← /joint_states ▶│ hand_tracker_node        │──▶ /focus/hand  ┌───────────────┐
  (robot_state_pub)    │ C++: rclcpp+tf2_ros      │                 │ focus_        │──▶ /head/cmd_pos
@@ -177,7 +178,7 @@ q* = (w_obj·q_obj + w_hand·q_hand) / (w_obj + w_hand)
 
 | Нода | Язык | Вход | Выход | Зависимости | Почему так |
 |---|---|---|---|---|---|
-| `object_detector_node.py` | Python (rclpy) | color+depth+camera_info; сервис `/focus/detect` | `/focus/target` | `rclpy, cv2 (opencv-python), numpy, message_filters, sensor_msgs, geometry_msgs, focus_tracking/srv/DetectObjects` | CV/ML-экосистема; 640×360 HSV-детектор ~5 мс/кадр на CPU — частота не критична |
+| `object_detector_node.py` | Python (rclpy) | color+depth+camera_info; сервис `/focus/detect` | `/focus/target`, `/focus/detection/viz` | `rclpy, cv2 (opencv-python), numpy, message_filters, cv_bridge, sensor_msgs, geometry_msgs, focus_tracking/srv/DetectObjects` | CV/ML-экосистема; 640×360 HSV-детектор ~5 мс/кадр на CPU — частота не критична |
 | `hand_tracker_node.cpp` | C++ (rclcpp) | TF2 (`/tf`,`/tf_static`), camera_info | `/focus/hand`, `/focus/hand_visible` | `rclcpp, tf2_ros, tf2_geometry_msgs, geometry_msgs, sensor_msgs, std_msgs, std_srvs` | 50 Гц, нулевой GC-джиттер, чистая математика матриц — vision не нужен |
 | `focus_controller_node.cpp` | C++ (rclcpp) | `/focus/target`, `/focus/hand`, `/head/status`, camera_info | `/head/cmd_pos` | `rclcpp, bodyctrl_msgs, geometry_msgs, sensor_msgs, std_srvs` | развитие готового `head_focus_node`; единый интерфейс цели ⇒ математика п.1–2 идентична для объекта и руки |
 
@@ -229,6 +230,26 @@ id перечисляет закреплённые номера. Порядок 
 ros2 service call /focus/detect focus_tracking/srv/DetectObjects                       # список
 ros2 service call /focus/detect focus_tracking/srv/DetectObjects "{select_name: red}"   # фокус по имени
 ros2 service call /focus/detect focus_tracking/srv/DetectObjects "{select_id: 3}"       # фокус по id
+```
+
+### Визуализация детекции: `/focus/detection/viz`
+
+Детектор публикует последний обработанный цветной кадр с нанесённой детекцией
+в топик `sensor_msgs/Image` (bgr8, frame_id=`camera_head_link`) — параметр
+`publish_viz` (по умолчанию true). Для каждого обнаруженного объекта рисуется:
+
+- **контур** blob-а (`findContours` по внешней границе largest connected
+  component; если контур вырожден (<3 точек) — bounding box);
+- **sticky id + имя цвета** подписью рядом с центром (`id N (name)`);
+- **центр** blob-а (u, v из centroid) крестом (`drawMarker MARKER_CROSS`).
+
+Цвет отрисовки контрастный к цвету самого объекта (red→жёлтый, green→маджента,
+blue→синий, yellow→голубой). Кадр визуализации публикуется на каждый
+синхронизированный RGB-D кадр (в auto-режиме) и на каждый вызов `/focus/detect`
+(в ручном), так что рамки всегда соответствуют опубликованному списку.
+
+```bash
+ros2 run rqt_image_view rqt_image_view /focus/detection/viz   # смотреть visualize.xgl
 ```
 
 ### Сборка и запуск

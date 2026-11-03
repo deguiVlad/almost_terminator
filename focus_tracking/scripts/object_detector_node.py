@@ -31,6 +31,8 @@ YOLO не нужен, хватает HSV-детектора + глубины (64
   ВХОД  /cam_head/depth/image_raw   sensor_msgs/Image (16UC1, мм, выровнена по color)
   ВХОД  /cam_head/color/camera_info sensor_msgs/CameraInfo
   ВЫХОД /focus/target               geometry_msgs/PoseStamped
+  ВЫХОД /focus/detection/viz        sensor_msgs/Image (bgr8) — визуализация детекции:
+                                    контур blob-а, sticky id + имя цвета, крест в центре
   СЕРВИС /focus/detect              focus_tracking/srv/DetectObjects
   ПАРАМЕТР color_names              список имён окон (по умолчанию red,green,blue,yellow)
   ПАРАМЕТР <имя>_window             плоский float-список [h_lo,s_lo,v_lo,h_hi,s_hi,v_hi]
@@ -39,6 +41,7 @@ YOLO не нужен, хватает HSV-детектора + глубины (64
   ПАРАМЕТР auto_select              true — публиковать самый большой blob сам (без сервиса)
   ПАРАМЕТР match_radius_m           порог сопоставления blob с существующим id, м
   ПАРАМЕТР ttl_s                    сколько секунд держать id без обнаружения
+  ПАРАМЕТР publish_viz              true — публиковать визуализацию в /focus/detection/viz
 
 Запуск:
   ros2 run focus_tracking object_detector_node --ros-args -p use_sim_time:=true \
@@ -56,6 +59,11 @@ from message_filters import ApproximateTimeSynchronizer, Subscriber
 from sensor_msgs.msg import CameraInfo, Image
 from geometry_msgs.msg import PoseStamped
 
+try:                       # cv_bridge может отсутствовать — визуализация тогда выключается
+    from cv_bridge import CvBridge
+except ImportError:
+    CvBridge = None
+
 try:
     from focus_tracking.srv import DetectObjects
 except ImportError:      # пакет ещё не собран — srv недоступен, но нодa работает в auto режиме
@@ -68,6 +76,14 @@ DEFAULT_COLORS = {
     "green":  [40, 80, 60, 85, 255, 255],
     "blue":   [95, 80, 60, 130, 255, 255],
     "yellow": [20, 80, 80, 38, 255, 255],
+}
+
+# цвета отрисовки контуров (BGR): контрастные к самим объектам
+VIZ_COLORS = {
+    "red":    (0, 255, 255),      # жёлтый
+    "green":  (255, 0, 255),      # маджента
+    "blue":   (0, 255, 0),        # зелёный
+    "yellow": (255, 0, 0),        # синий
 }
 
 
@@ -89,6 +105,7 @@ class ObjectDetectorNode(Node):
         self.declare_parameter("auto_select", True)
         self.declare_parameter("match_radius_m", 0.15)
         self.declare_parameter("ttl_s", 5.0)
+        self.declare_parameter("publish_viz", True)   # визуализация детекции в /focus/detection/viz
 
         self.min_area = float(self.get_parameter("min_area").value)
         self.dwin = int(self.get_parameter("depth_window").value)
@@ -96,6 +113,7 @@ class ObjectDetectorNode(Node):
         self.auto_select = bool(self.get_parameter("auto_select").value)
         self.match_r = float(self.get_parameter("match_radius_m").value)
         self.ttl = float(self.get_parameter("ttl_s").value)
+        self.publish_viz = bool(self.get_parameter("publish_viz").value)
 
         # ROS 2 не позволяет ни смешивать строки и числа в одном параметре-списке,
         # ни использовать вложенные списки. Поэтому каждое окно — отдельный
@@ -127,6 +145,16 @@ class ObjectDetectorNode(Node):
         self.next_id = 1             # monotone counter: освобождённые номера НЕ переиспользуются
 
         self.pub = self.create_publisher(PoseStamped, "/focus/target", 10)
+
+        # визуализация детекции: контуры blob + id + центр -> Image в топик
+        self.viz_pub = None
+        self.bridge = None
+        if self.publish_viz:
+            if CvBridge is None:
+                self.get_logger().warn("cv_bridge недоступен — визуализация выключена")
+            else:
+                self.bridge = CvBridge()
+                self.viz_pub = self.create_publisher(Image, "/focus/detection/viz", 5)
 
         self.info_sub = self.create_subscription(
             CameraInfo, "/cam_head/color/camera_info", self.on_info, 5)
@@ -163,12 +191,14 @@ class ObjectDetectorNode(Node):
 
     def on_rgbd(self, color: Image, depth: Image):
         self.last_frame = (color, depth)
-        if self.auto_select and self.selected is None and self.fx is not None:
-            objs = self.detect(color, depth)
-            if objs:
-                # самый большой blob; id у него sticky — не «прыгает» между кадрами
-                target = max(objs, key=lambda o: o["area"])
-                self.publish_target(target["pose"])
+        if self.fx is None:
+            return
+        objs = self.detect(color, depth)
+        self.publish_viz_image(color, objs)
+        if self.auto_select and self.selected is None and objs:
+            # самый большой blob; id у него sticky — не «прыгает» между кадрами
+            target = max(objs, key=lambda o: o["area"])
+            self.publish_target(target["pose"])
 
     # -------------------------------------------------------------- детекция
     def detect(self, color: Image, depth: Image):
@@ -194,7 +224,7 @@ class ObjectDetectorNode(Node):
                     cv2.inRange(hsv, (h_lo, s_lo, v_lo), (179, 255, 255)),
                     cv2.inRange(hsv, (0, s_lo, v_lo), (h_hi, s_hi, v_hi)))
             mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-            n, _, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
+            n, labels, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
             if n <= 1:
                 continue
             idx = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
@@ -202,6 +232,13 @@ class ObjectDetectorNode(Node):
             if area < self.min_area:
                 continue
             u, v = float(cents[idx][0]), float(cents[idx][1])
+
+            # внешний контур blob-а (для визуализации); findContours по label-маске
+            # этого компонента -> самая большая кривая
+            contours, _ = cv2.findContours(
+                (labels == idx).astype(np.uint8), cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE)
+            contour = max(contours, key=cv2.contourArea) if contours else None
 
             # медиана глубины в окне вокруг центра (защита от краёв объектов/дыр)
             y0, y1 = max(0, int(v) - w), min(d_img.shape[0], int(v) + w + 1)
@@ -217,7 +254,8 @@ class ObjectDetectorNode(Node):
             # обратная проекция pinhole: пиксель + глубина -> 3D в camera_head_link
             x = (u - self.cx) * d / self.fx
             y = (v - self.cy) * d / self.fy
-            raw.append(dict(name=name, area=area, u=u, v=v, depth=d, x=x, y=y, z=d))
+            raw.append(dict(name=name, area=area, u=u, v=v, depth=d, x=x, y=y, z=d,
+                            contour=contour))
 
         # ---------- sticky-ID соответствие (greedy nearest-neighbour) ----------
         used_ids, out = set(), []
@@ -253,6 +291,33 @@ class ObjectDetectorNode(Node):
             out.append(o)
         return out
 
+    # -------------------------------------------------------------- визуализация
+    def publish_viz_image(self, color: Image, objs):
+        """Рисует на последнем цветном кадре контур каждого обнаруженного blob-а,
+        его sticky id и центр (u, v); результат — sensor_msgs/Image в /focus/detection/viz.
+        """
+        if self.viz_pub is None or self.bridge is None:
+            return
+        bgr = self._to_np(color)[:, :, ::-1].copy()          # rgb8 -> bgr
+        for o in objs:
+            col = VIZ_COLORS.get(o["name"], (255, 255, 255))  # BGR по имени цвета
+            cnt = o.get("contour")
+            if cnt is not None and len(cnt) >= 3:
+                cv2.drawContours(bgr, [cnt], -1, col, 2)      # контур объекта
+            elif cnt is not None:
+                # деградация: blob из ~4 точек после MORPH_OPEN — рисуем bbox
+                x, y, bw, bh = cv2.boundingRect(cnt)
+                cv2.rectangle(bgr, (x, y), (x + bw, y + bh), col, 2)
+            u, v = int(round(o["u"])), int(round(o["v"]))
+            label = f"id {o['id']} ({o['name']})"
+            cv2.putText(bgr, label, (u + 8, v - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 2, cv2.LINE_AA)
+            cv2.drawMarker(bgr, (u, v), col, cv2.MARKER_CROSS, 14, 2)  # центр blob-а
+        msg = self.bridge.cv2_to_imgmsg(bgr, encoding="bgr8")
+        msg.header.stamp = color.header.stamp
+        msg.header.frame_id = "camera_head_link"
+        self.viz_pub.publish(msg)
+
     # -------------------------------------------------------------- сервис
     def on_detect(self, request, response):
         if self.last_frame is None or self.fx is None:
@@ -261,6 +326,7 @@ class ObjectDetectorNode(Node):
             return response
 
         objs = self.detect(*self.last_frame)
+        self.publish_viz_image(self.last_frame[0], objs)     # свежие рамки даже в ручном режиме
         response.names = [o["name"] for o in objs]
         response.ids = [o["id"] for o in objs]
         response.areas_px = [o["area"] for o in objs]

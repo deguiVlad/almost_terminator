@@ -10,8 +10,8 @@
 - Полный формат любого сообщения или сервиса: `bash hackathon/tools/ros.sh ros2 interface show <тип>`, например
   `bodyctrl_msgs/msg/CmdSetMotorPosition`. Пример узла, который читает суставы, камеру и задачу и двигает головой и
   кистью: `hackathon/ros2/hello_world`.
-- Краткая справочная таблица всех топиков, узлов, сервисов и частот — в шпаргалке
-  [nssr_hackathon_interfaces_cheatsheet_RU.md](nssr_hackathon_interfaces_cheatsheet_RU.md).
+- Краткая сводка всего документа (топики, моторы, сервисы, частоты, задачи и баллы) — в шпаргалке
+  [cheatsheet.md](cheatsheet.md).
 
 ## Моторы
 

@@ -1,8 +1,8 @@
 # Проверка решений
 
 Как оцениваются решения и в каком виде их сдавать. Задачи и варианты описаны в [TASKS.md](TASKS.md), интерфейсы
-робота — в [INTERFACES.md](INTERFACES.md) (краткая справка — в
-[шпаргалке](nssr_hackathon_interfaces_cheatsheet_RU.md)).
+робота — в [INTERFACES.md](INTERFACES.md) (краткая сводка всех трёх документов — в
+[шпаргалке](cheatsheet.md)).
 
 ## Что проверяется
 

@@ -1,182 +1,131 @@
-Вот переработанная, структурированная и дополненная подсказками версия шпаргалки. Она ориентирована на быстрое восприятие, содержит цветовые/визуальные маркеры и практические комментарии, чтобы снизить порог входа для участников хакатона.
+# 📋 Шпаргалка по ROS 2-интерфейсам хакатона (nssr-sim)
 
----
+Быстрый справочник по командам. Полное описание интерфейсов, моторов и задач — в [INTERFACES.md](INTERFACES.md),
+условия задач — в [TASKS.md](TASKS.md), оценка — в [SCORING.md](SCORING.md).
 
-# 🚀 Шпаргалка по ROS2-интерфейсам хакатона (nssr-sim)
-*Автор концепта: Nikolay Semenov. Симулятор: `nssr-sim` (ROS2 Humble + Isaac Sim).*
+Симулятор `nssr-sim` — контейнер с ROS 2 Humble + Isaac Sim. `ROS_DOMAIN_ID=146`, профиль DDS
+`hackathon/docker/fastdds_hack.xml`. Обёртка `bash hackathon/tools/ros.sh <команда>` сама источникит окружение
+ROS и подставляет домен; без неё перед любой `ros2`-командой выполняйте
+`source /opt/ros/humble/setup.bash && export ROS_DOMAIN_ID=146`.
 
-> ⚠️ **ГЛАВНОЕ ПРАВИЛО КОНТЕЙНЕРА**  
-> Перед **любой** командой `ros2` внутри контейнера необходимо выполнять инициализацию окружения. Если вы используете обёртку `ros.sh`, она делает это за вас. Если нет, всегда начинайте с:
-> ```bash
-> source /opt/ros/humble/setup.bash && export ROS_DOMAIN_ID=146
-> ```
-> 💡 *Подсказка: `ROS_DOMAIN_ID=146` изолирует ваш трафик от других участников хакатона в той же сети. Без этого вы будете видеть чужие топики или не увидите свои.*
+## 1. Работа с симуляцией
 
----
+| Действие | Команда |
+|---|---|
+| Список топиков / узлов | `bash hackathon/tools/ros.sh ros2 topic list` (аналогично `ros2 node list`) |
+| Проверить интерфейсы | `bash hackathon/tools/ros.sh python3 /nssr_sim/hackathon/tools/check_interfaces.py` |
+| Сборка и запуск hello_world | `bash hackathon/tools/ros.sh "cd /nssr_sim/hackathon/ros2 && colcon build --packages-select hello_world && source install/setup.bash && ros2 run hello_world hello"` |
 
-## 1. 🛠️ Основы работы с симуляцией
+## 2. Узлы симулятора
 
-Все основные команды удобно запускать через специальный скрипт-обёртку `ros.sh`, который автоматически подставляет нужные переменные окружения.
+| Узел | Назначение |
+|---|---|
+| `/hack_sim_node` | ядро симулятора: физика и состояние мира |
+| `/cloud_cam_head`, `/cloud_cam_torso` | драйверы камер головы и торса (RGB, depth, облака точек) |
+| `/hack_camera_bridge` | бридж ROS 2 ↔ внутренний SDK камер |
+| `/tiangong_ros_bridge` | бридж совместимости с роботом TienKung |
+| `/robot_state_publisher` | дерево TF из URDF и `/joint_states` |
+| `/rviz` | визуализация (запускается отдельно, `rviz2`) |
+| `/transform_listener_impl_*` | внутренние слушатели TF2 |
 
-| Действие | Команда | 💡 Подсказка |
-| :--- | :--- | :--- |
-| **Список всех топиков** | `bash ~/nssr-polygon/hackathon/tools/ros.sh ros2 topic list` | Используйте `| grep <имя>`, чтобы найти нужный топик. |
-| **Проверка интерфейсов** | `bash hackathon/tools/ros.sh python3 /nssr_sim/hackathon/tools/check_interfaces.py` | **Обязательно к запуску!** Скрипт проверит, что все типы сообщений и сервисы корректно сгенерированы и доступны. |
-| **Сборка и запуск примера** | `bash hackathon/tools/ros.sh "cd /nssr_sim/hackathon/ros2 && colcon build --packages-select hello_world && source install/setup.bash && ros2 run hello_world hello"` | Шаблон для запуска любого вашего пакета. |
+## 3. Топики
 
----
+Направление: **в** — команды роботу, **из** — данные от робота.
 
-## 2. 🧠 Узлы (Nodes) и их назначение
+### 3.1 Движение (arm / head / waist)
 
-| Узел | Назначение | 💡 Подсказка |
-| :--- | :--- | :--- |
-| `/hack_sim_node` | Ядро симулятора | Управляет физикой и состоянием мира Isaac Sim. |
-| `/cloud_cam_head` <br> `/cloud_cam_torso` | Драйверы камер головы и таза | Публикуют RGB, Depth и PointCloud. |
-| `/hack_camera_bridge` | Бридж ROS2 ↔ внутренний SDK | Связующее звено для работы с камерами. |
-| `/tiangong_ros_bridge` | Тихогонг-бридж | Специфичный бридж для аппаратной совместимости. |
-| `/robot_state_publisher` | Публикация TF по URDF | Преобразует `joint_states` в дерево координат (`/tf`). |
-| `/rviz` | Визуализация | Запустите `rviz2`, чтобы увидеть робота и данные камер. |
-| `/transform_listener_impl_*` | Слушатели TF2 | Внутренние узлы для отслеживания трансформаций. |
+Для каждой группы `{arm,head,waist}` свои топики; ID моторов и пределы суставов — в [INTERFACES.md](INTERFACES.md).
 
----
+| Топик | Тип | Напр. | Частота | Примечание |
+|---|---|---|---|---|
+| `/{arm,head,waist}/cmd_pos` | `bodyctrl_msgs/CmdSetMotorPosition` | в | — | позиционное управление: `name` (ID), `pos` (рад), `spd` (рад/с, 0 = с предельной скоростью), `cur` не используется |
+| `/{arm,head,waist}/cmd_vel` | `bodyctrl_msgs/CmdSetMotorSpeed` | в | — | скоростное управление, рад/с; без новых команд 0.25 с мотор держит позицию |
+| `/{arm,head,waist}/cmd_ctrl` | `bodyctrl_msgs/CmdMotorCtrl` | в | — | PID-набор полей (kp, kd, pos, spd, tor); в симуляторе работает только `pos` |
+| `/{arm,head,waist}/status` | `bodyctrl_msgs/MotorStatusMsg` | из | 20 Гц | `pos` и `speed` каждого мотора |
+| `/leg/*` | те же типы | — | — | заморожены: ног в симуляции нет, не тратьте время |
 
-## 3. 📡 Топики (Темы для обмена данными)
+Скорость всех моторов рук, головы и корпуса ограничена 0.8 рад/с (как у реального робота на хакатоне).
 
-*Легенда направлений:* 🟢 **В** (входящие, команды роботу) | 🔴 **ИЗ** (исходящие, данные от робота)
+### 3.2 Кисти Inspire
 
-### 3.1. Движение робота (Туловище и конечности)
-| Топик | Тип сообщения | Напр. | Частота | 💡 Подсказка |
-| :--- | :--- | :---: | :---: | :--- |
-| `/arm/cmd_pos` <br> `/head/cmd_pos` <br> `/waist/cmd_pos` | `CmdSetMotorPosition` | 🟢 В | — | **Позиционный контроль.** Указываем угол (rad), скорость (rpm) и ток (A). |
-| `/arm/cmd_ctrl` <br> `/head/cmd_ctrl` <br> `/waist/cmd_ctrl` | `CmdMotorCtrl` | 🟢 В | — | **PID-контроль.** Полный контроль: `kp`, `kd`, позиция, скорость, момент (Nm). |
-| `/arm/cmd_vel` <br> `/head/cmd_vel` <br> `/waist/cmd_vel` | `CmdSetMotorSpeed` | 🟢 В | — | **Скоростной контроль.** Только скорость (rpm) и ток (A). |
-| `/arm/status` <br> `/head/status` <br> `/waist/status` | `MotorStatusMsg` | 🔴 ИЗ | 20 Hz | Текущее состояние моторов: позиция, скорость, ток, температура, ошибки. |
-| `/leg/...` | *Различные* | 🟢/🔴 | — | ⚠️ **ЗАМОРОЖЕНЫ.** Ноги в симуляции неподвижны, не тратьте время на их управление. |
+| Топик | Тип | Напр. | Частота |
+|---|---|---|---|
+| `/inspire_hand/ctrl/{left,right}_hand` | `sensor_msgs/JointState` | в | — |
+| `/inspire_hand/state/{left,right}_hand` | `sensor_msgs/JointState` | из | 20 Гц |
 
-### 3.2. Кисти рук (inspire_hand)
-| Топик | Тип | Напр. | Частота | 💡 Подсказка |
-| :--- | :--- | :---: | :---: | :--- |
-| `/inspire_hand/state/{left,right}_hand` | `JointState` | 🔴 ИЗ | 20 Hz | Текущее состояние пальцев. |
-| `/inspire_hand/ctrl/{left,right}_hand` | `JointState` | 🟢 В | — | **Управление:** `name` = ["1","2","3","4","5","6"], `position` = [0.0...1.0]. |
+Пальцы `name`: `1` мизинец, `2` безымянный, `3` средний, `4` указательный, `5` сгиб большого пальца,
+`6` поворот большого пальца. `position`: `1.0` раскрыт, `0.0` сжат.
 
-> 💡 **Анатомия кисти (порядок индексов 1–6):**  
-> `1` = мизинец, `2` = безымянный, `3` = средний, `4` = указательный, `5` = большой палец (средняя фаланга), `6` = большой палец (основание).  
-> **Значение `position`:** `0.0` = полностью закрыт (в кулак), `1.0` = полностью открыт (расправлен).
+### 3.3 Камеры (`cam_head`, `cam_torso`)
 
-### 3.3. Камеры (Head и Torso)
-Для каждой камеры (`cam_head` и `cam_torso`) доступны:
-*   `/color/image_raw` (`Image`, 5 Hz) – обычное изображение.
-*   `/depth/image_raw` (`Image`, 5 Hz) – карта глубины.
-*   `/color/camera_info` и `/depth/camera_info` (`CameraInfo`, 5 Hz) – матрицы калибровки (нужны для 3D-реконструкции).
-*   `/points` (Point Cloud) – облако точек (если включено).
-> ⚠️ **HACK_CAMS:** Камеры таза (`torso`) могут быть программно отключены в режиме `HACK_CAMS`. Всегда проверяйте их наличие.
+| Топик | Тип | Частота |
+|---|---|---|
+| `/cam_*/color/image_raw` | `sensor_msgs/Image` (`rgb8`) | ~5 Гц |
+| `/cam_*/depth/image_raw` | `sensor_msgs/Image` (`16UC1`, мм; 0 = нет данных) | ~5 Гц |
+| `/cam_*/{color,depth}/camera_info` | `sensor_msgs/CameraInfo` | ~5 Гц |
+| `/cam_*/points` | облако точек | ~5 Гц |
 
-### 3.4. Системные и сенсорные топики
-| Топик | Тип | Частота | 💡 Подсказка |
-| :--- | :--- | :---: | :--- |
-| `/arm_6dof_left`, `/arm_6dof_right` | `WrenchStamped` | 20 Hz | Сила (`force`) и момент (`torque`) на запястье. Пустая рука ≈ 0. |
-| `/joint_states` | `JointState` | 20 Hz | Общие состояния всех суставов (нужен для `/robot_state_publisher`). |
-| `/tf`, `/tf_static` | `TFMessage` | 10 Hz / стат. | Дерево координат. |
-| `/clock` | `Clock` | 20 Hz | ⚠️ **SIM TIME!** Симуляция использует своё время. Не полагайтесь на системное время (`time.time()` в Python), используйте `rospy.Time.now()` или `node.get_clock().now()`. |
-| `/sim/task` | `String` (JSON) | latched | Текущее задание хакатона. Читается один раз при старте. |
-| `/sim/task_result` | `String` (JSON) | latched | Результат проверки задания. |
-| `/sim/objects/names` | `String` (JSON) | latched | Список объектов и их координат в сцене. |
-| `/sim/cmd_reset` | `String` | — | Отправьте сообщение для сброса сцены. |
+Камеры можно ограничить одной головой: `--cams head` / `HACK_CAMS` — тогда топиков `cam_torso` нет, проверяйте их
+наличие. Разрешение 640x360, горизонтальный угол обзора 86°.
 
----
+### 3.4 Сенсоры и системные
 
-## 4. ⚙️ Сервисы (Services)
+| Топик | Тип | Частота | Примечание |
+|---|---|---|---|
+| `/arm_6dof_{left,right}` | `geometry_msgs/WrenchStamped` | 20 Гц | нагрузка на кисть в рамке `wrist_roll_*_link`, вес кисти вычтен; пустая кисть ≈ 0 |
+| `/joint_states` | `sensor_msgs/JointState` | 20 Гц | все суставы, включая пальцы |
+| `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | 10 Гц / стат. | дерево звеньев из URDF |
+| `/clock` | `rosgraph_msgs/Clock` | 20 Гц | ⚠️ время симуляции: узлы запускайте с `use_sim_time:=true`, не используйте системное время |
+| `/robot_description` | `std_msgs/String` | — | URDF робота |
 
-Сервисы работают по принципу "запрос-ответ". Используйте `ros2 service call` для взаимодействия.
+### 3.5 Топики задачи
 
-### 4.1. Управление кистями (inspire_hand)
-| Сервис | Назначение | 💡 Подсказка |
-| :--- | :--- | :--- |
-| `/inspire_hand/set_angle_flexible/{left,right}_hand` | Компенсация угла (flex) | Для более естественного хвата. |
-| `/inspire_hand/set_speed/{left,right}_hand` | Скорость смыкания | Поля `speed0_ratio` ... `speed5_ratio` (от 0.0 до 1.0). |
-| `/inspire_hand/set_force/{left,right}_hand` | Сила сжатия | Поля `force1` ... `force6`. Не ставьте макс. значение, чтобы не "сломать" виртуальный объект. |
-| `/inspire_hand/set_clear_error/{left,right}_hand` | Сброс ошибок | Если кисть "зависла" или ушла в ошибку, вызовите этот сервис. |
+| Топик | Тип | Напр. | Примечание |
+|---|---|---|---|
+| `/sim/task` | `std_msgs/String`, JSON | из, latched | задача и правило; читать при старте |
+| `/sim/objects/names` | `std_msgs/String`, JSON | из, latched | объекты и категории, без координат |
+| `/sim/task/done` | `std_msgs/Empty` | в | сигнал завершения раскладки, см. [SCORING.md](SCORING.md) |
+| `/sim/task/check` → `/sim/task/result` | `std_msgs/Int32` → `std_msgs/String`, JSON | в → из | самопроверка, отладка; на итоговой проверке отключён |
+| `/sim/objects/randomize` | `std_msgs/Int32` | в | новая раскладка по сидy, отладка |
+| `/sim/objects/set` | `std_msgs/String`, JSON | в | поставить объект `{"имя": [x, y, yaw]}`, отладка |
 
-### 4.2. Параметрические сервисы
-Узлы `/cloud_cam_*`, `/hack_sim_node`, `/robot_state_publisher` и др. поддерживают стандартный набор ROS2-сервисов для работы с параметрами: `get_parameters`, `set_parameters`, `list_parameters` и т.д.
+Latched = durability `TRANSIENT_LOCAL`: подписчик получает последнее сообщение сразу после подписки.
+Форматы JSON и правила задач — в [INTERFACES.md](INTERFACES.md) и [TASKS.md](TASKS.md).
 
----
+## 4. Сервисы кистей
 
-## 5. 🤖 Анатомия робота и ID моторов
+| Сервис | Назначение |
+|---|---|
+| `/inspire_hand/set_angle_flexible/{left,right}_hand` | то же, что `ctrl/{...}_hand`, только сервисом |
+| `/inspire_hand/set_speed/{left,right}_hand` | скорость пальцев: 1.0 = полный ход за 0.8 с (по умолчанию), 0.5 = за 1.6 с |
+| `/inspire_hand/set_force/{left,right}_hand` | предел силы: 1.0 соответствует 1000 г (по умолчанию) |
+| `/inspire_hand/set_clear_error/{left,right}_hand` | всегда успешен: ошибок кисти в симуляторе нет |
 
-Понимание ID моторов критически важно для отправки команд в `/.../cmd_pos` или `/.../cmd_ctrl`.
+У остальных узлов (`/hack_sim_node`, драйверы камер, `/robot_state_publisher` и т.д.) — стандартные сервисы
+параметров ROS 2: `get_parameters`, `set_parameters`, `list_parameters` и др.
 
-| Группа | ID мотора | Название сустава (Joint) | Справочная скорость |
-| :--- | :---: | :--- | :---: |
-| **Голова** (head) | 1 | `head_roll_joint` (наклон) | 0.20 |
-| | 2 | `head_pitch_joint` (кивок) | 0.20 |
-| | 3 | `head_yaw_joint` (поворот) | 0.30 |
-| **Пояс** (waist) | 31 | `body_yaw_joint` (поворот корпуса) | 0.25 |
-| **Левая рука** (arm) | 11–17 | `shoulder_pitch_l`, `shoulder_roll_l`, `shoulder_yaw_l`, `elbow_pitch_l`, `elbow_yaw_l`, `wrist_pitch_l`, `wrist_roll_l` | 0.20 – 0.30 |
-| **Правая рука** (arm) | 21–27 | `shoulder_pitch_r`, `shoulder_roll_r`, `shoulder_yaw_r`, `elbow_pitch_r`, `elbow_yaw_r`, `wrist_pitch_r`, `wrist_roll_r` | 0.20 – 0.30 (некоторые отриц.) |
-| **Ноги** (leg) | 50-60-е | *Заморожены в симуляции* | — |
-
-> 💡 **Лайфхак по ID:** Первая цифра ID указывает на группу: `0` = голова, `1` = левая рука, `2` = правая рука, `3` = корпус, `5`/`6` = ноги.
-
----
-
-## 6. 📦 Ключевые типы сообщений (кратко)
-
-*   **`MotorStatusMsg`**: Массив структур `MotorStatus`. Самое важное поле: `name` (это ID мотора из таблицы выше), `pos` (рад), `speed` (рад/с), `error` (код ошибки, 0 = ОК).
-*   **`CmdSetMotorPosition`**: Команда. Поля: `name` (ID), `pos` (целевой угол в рад), `spd` (скорость в rpm), `cur` (ограничение тока в А).
-*   **`JointState`**: Стандартный тип. Массивы `name`, `position`, `velocity`, `effort` должны быть **одинаковой длины**.
-*   **`WrenchStamped`**: Содержит `wrench.force` (x, y, z) и `wrench.torque` (x, y, z). Привязан к фрейму `wrist_roll_*_link`.
-
----
-
-## 7. 🎯 Задачи и объекты симуляции
-
-Взаимодействие с логикой хакатона происходит через JSON-строки в специфичных топиках.
-
-| Действие | Топик / Файл | Формат данных |
-| :--- | :--- | :--- |
-| Узнать текущее задание | `/sim/task` (latched) | JSON: `{"task": "sort2", ...}` |
-| Заспавнить объект вручную | `/sim/objects/set` | JSON: `{"name": [x, y, yaw]}` |
-| Случайная расстановка | `/sim/objects/randomize` | `int` (SEED для генератора случайных чисел) |
-| Проверить выполнение | `/sim/task/check` | Отправьте `std_msgs/String` со значением `"1"` |
-| Получить результат | `/sim/task_result` (latched) | JSON с отчётом об успехе/ошибках |
-
-> 💡 **Где смотреть конфигурации?** В папке `config/` внутри пакета: `tasks.yaml` (список заданий: `sort2`, `sort3`, `tubes`), `objects.yaml` (пулы объектов), `lab.yaml` (параметры задания с пробирками).
-
----
-
-## 8. 🏃‍♂️ Быстрый старт (Copy-Paste шпаргалка)
+## 5. Быстрые примеры
 
 ```bash
-# 1. Осмотр окружения (убедитесь, что симулятор запущен)
-bash ~/nssr-polygon/hackathon/tools/ros.sh ros2 topic list
-bash ~/nssr-polygon/hackathon/tools/ros.sh ros2 node list
+# Повернуть голову влево (head_yaw, мотор 3) на 0.5 рад со скоростью 0.5 рад/с
+bash hackathon/tools/ros.sh "ros2 topic pub -t 3 /head/cmd_pos bodyctrl_msgs/msg/CmdSetMotorPosition \
+  '{cmds: [{name: 3, pos: 0.5, spd: 0.5, cur: 1.0}]}'"
 
-# 2. Проверка корректности интерфейсов (ОБЯЗАТЕЛЬНО)
-bash ~/nssr-polygon/hackathon/tools/ros.sh python3 /nssr_sim/hackathon/tools/check_interfaces.py
+# Сжать правую кисть (позиция 0.2 = почти кулак, большой палец 0.5)
+bash hackathon/tools/ros.sh "ros2 topic pub -t 3 /inspire_hand/ctrl/right_hand sensor_msgs/msg/JointState \
+  \"{name: ['1','2','3','4','5','6'], position: [0.2, 0.2, 0.2, 0.2, 0.5, 0.2]}\""
 
-# 3. Сборка и запуск ВАШЕГО пакета (замените my_pkg и my_node)
-cd /nssr_sim/hackathon/ros2
-colcon build --packages-select my_pkg
-source install/setup.bash
-ros2 run my_pkg my_node
-
-# 4. ТЕСТ: Повернуть голову вправо (yaw, мотор ID=3) на 0.3 радиана
-# (Выполняется в одной строке для удобства копирования)
-bash ~/nssr-polygon/hackathon/tools/ros.sh ros2 topic pub /head/cmd_pos bodyctrl_msgs/msg/CmdSetMotorPosition "{cmds: [{name: 3, pos: 0.3, spd: 10.0, cur: 1.0}]}"
-
-# 5. ТЕСТ: Закрыть правую кисть на 30% (position = 0.3)
-bash ~/nssr-polygon/hackathon/tools/ros.sh ros2 topic pub /inspire_hand/ctrl/right_hand sensor_msgs/msg/JointState "{name: ['1','2','3','4','5','6'], position: [0.3, 0.3, 0.3, 0.3, 0.3, 0.3]}"
+# Посмотреть задачу, нагрузку на запястье и калибровку камеры
+bash hackathon/tools/ros.sh "ros2 topic echo --once /sim/task"
+bash hackathon/tools/ros.sh ros2 topic echo --once /arm_6dof_right
+bash hackathon/tools/ros.sh ros2 topic echo --once /cam_head/color/camera_info
 ```
 
----
+## 6. Подводные камни
 
-## 9. ⚠️ Подводные камни (HACK / Важные нюансы)
-
-1. **SIM TIME vs WALL TIME**: Симуляция работает в своём времени (`use_sim_time=True`). Если ваш Python-скрипт использует `time.sleep()` или `time.time()`, он может работать некорректно или "зависнуть", ожидая тиков симуляции. Используйте `node.create_rate()` или `rclpy.time.Time`.
-2. **Ноги (Legs)**: Топики `/leg/...` существуют для совместимости с реальным роботом, но в симуляции они **заморожены**. Не пытайтесь управлять ходьбой.
-3. **Камеры таза**: Могут быть отключены флагом `HACK_CAMS` для экономии ресурсов. Всегда проверяйте наличие топиков `/cam_torso/...` перед их использованием.
-4. **`/hric/robot/float_base_rpyz_cmd`**: Этот топик есть только на реальном роботе (для управления базой). В симуляции поворот корпуса осуществляется через мотор пояса (`waist`, ID=31).
-
----
-*Документ адаптирован для быстрого чтения и практического применения. Удачи на хакатоне! 🏆*
+1. **Время симуляции.** Симулятор идёт медленнее реального времени; метки в `/clock`. Без `use_sim_time:=true`
+   таймеры и ожидания вашего кода будут считаться в реальном времени и «убегут» от симуляции.
+2. **Ноги.** Топики `/leg/*` есть для совместимости с реальным роботом, но заморожены; корпус поворачивается
+   только мотором 31 (`waist`). Наклон и высота базы (`/hric/robot/float_base_rpyz_cmd`) — только на реальном роботе.
+3. **Камеры.** В режиме `--cams head` торсовая камера отсутствует; перед использованием проверяйте наличие топиков.
+4. **Ограничение скорости 0.8 рад/с** действует и на итоговой проверке — решения «в обход» лимита не пройдут.

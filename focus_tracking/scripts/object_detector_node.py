@@ -32,8 +32,9 @@ YOLO не нужен, хватает HSV-детектора + глубины (64
   ВХОД  /cam_head/color/camera_info sensor_msgs/CameraInfo
   ВЫХОД /focus/target               geometry_msgs/PoseStamped
   СЕРВИС /focus/detect              focus_tracking/srv/DetectObjects
-  ПАРАМЕТР color_windows            вложенный список [[h_lo,s_lo,v_lo,h_hi,s_hi,v_hi], ...]
-  ПАРАМЕТР color_names              имена окон по порядку (по умолчанию red,green,blue,yellow)
+  ПАРАМЕТР color_names              список имён окон (по умолчанию red,green,blue,yellow)
+  ПАРАМЕТР <имя>_window             плоский float-список [h_lo,s_lo,v_lo,h_hi,s_hi,v_hi]
+                                    для каждого имени из color_names
   ПАРАМЕТР min_area                 минимальная площадь blob в пикселях (по умолчанию 300)
   ПАРАМЕТР auto_select              true — публиковать самый большой blob сам (без сервиса)
   ПАРАМЕТР match_radius_m           порог сопоставления blob с существующим id, м
@@ -74,8 +75,11 @@ class ObjectDetectorNode(Node):
     def __init__(self):
         super().__init__("object_detector_node")
 
-        self.declare_parameter("color_windows", [])   # [[h_lo,s_lo,v_lo,h_hi,s_hi,v_hi], ...]
-        self.declare_parameter("color_names", [])     # имена окон по порядку
+        self.declare_parameter("color_names", [])     # имена окон (строки)
+        self.declare_parameter("red_window", [])     # [h_lo,s_lo,v_lo,h_hi,s_hi,v_hi]
+        self.declare_parameter("green_window", [])
+        self.declare_parameter("blue_window", [])
+        self.declare_parameter("yellow_window", [])
         self.declare_parameter("min_area", 300.0)
         self.declare_parameter("depth_window", 9)
         self.declare_parameter("max_range_m", 5.5)   # depth==0 => нет данных (>6 м)
@@ -90,23 +94,26 @@ class ObjectDetectorNode(Node):
         self.match_r = float(self.get_parameter("match_radius_m").value)
         self.ttl = float(self.get_parameter("ttl_s").value)
 
-        # ROS 2 не позволяет смешивать строки и числа в одном параметре-списке,
-        # поэтому окна (только числа) и имена (только строки) — два отдельных параметра.
-        windows = self.get_parameter("color_windows").value
+        # ROS 2 не позволяет ни смешивать строки и числа в одном параметре-списке,
+        # ни использовать вложенные списки. Поэтому каждое окно — отдельный
+        # плоский float-параметр <имя>_window, а имена — строковый список color_names.
         names = self.get_parameter("color_names").value
-        if windows:
-            default_names = list(DEFAULT_COLORS)
-            self.colors = {}
-            for i, win in enumerate(windows):
-                if i < len(names):
-                    name = str(names[i])
-                elif i < len(default_names):
-                    name = default_names[i]
-                else:
-                    name = f"color_{i + 1}"
+        if not names:
+            names = list(DEFAULT_COLORS)
+        self.colors = {}
+        for name in names:
+            name = str(name)
+            win = []
+            param_name = f"{name}_window"
+            if self.has_parameter(param_name):
+                win = self.get_parameter(param_name).value
+            if len(win) == 6:
                 self.colors[name] = [float(x) for x in win]
-        else:
-            self.colors = dict(DEFAULT_COLORS)
+            elif name in DEFAULT_COLORS:
+                self.colors[name] = [float(x) for x in DEFAULT_COLORS[name]]
+            else:
+                self.get_logger().warn(
+                    f"No valid window for color '{name}' (param {param_name}), skipping")
 
         self.fx = self.fy = self.cx = self.cy = None
         self.last_frame = None       # (color_msg, depth_msg) — последний синхронизированный кадр

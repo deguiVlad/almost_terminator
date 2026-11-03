@@ -24,7 +24,7 @@
 //   ПАРАМЕТР source              object | hand | both
 //
 // Запуск:
-//   ros2 run focus_tracking focus_controller_node --ros-args -p use_sim_time:=true \
+//   ros2 run focus_tracking focus_controller_node --ros-args -p use_sim_time:=true 
 //     -p source:=both -p yaw_limit:=1.5 -p pitch_limit:=0.44
 
 #include <algorithm>

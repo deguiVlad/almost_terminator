@@ -19,7 +19,7 @@
 //   СЕРВИС /focus/set_hand           std_srvs/SetBool           выбрать руку: true=правая, false=левая
 //
 // Запуск:
-//   ros2 run focus_tracking hand_tracker_node --ros-args -p use_sim_time:=true \
+//   ros2 run focus_tracking hand_tracker_node --ros-args -p use_sim_time:=true 
 //     -p hand:=right -p rate_hz:=50.0
 
 #include <chrono>
@@ -94,8 +94,8 @@ private:
         try {
             // Ключевой запрос: начало координат кисти в системе координат камеры головы.
             ts = tf_buffer_->lookupTransform(camera_frame_, wrist_frame(),
-                                             tf2::TimePointZero,
-                                             rclcpp::Duration(0, 50'000'000));
+                                 rclcpp::Clock().now(),
+                                 rclcpp::Duration(0, 50'000'000));
         } catch (const tf2::ExtrapolationException &) {
             return;  // joint_states ещё не пришли — молча пропускаем цикл
         } catch (const tf2::TransformException &ex) {

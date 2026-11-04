@@ -14,22 +14,36 @@ from launch_ros.actions import Node
 
 
 def _node_exec(name):
-    """Исполняемый ноды: сначала собранный (lib/arm_ik/*.py), затем исходники пакета.
+    """Исполняемый ноды: сначала собранный (lib/arm_ik/*), затем исходники пакета.
 
-    Это позволяет запускать launch-файл и без colcon build — из исходного
-    дерева пакетов (fallback на arm_ik/bin/<name>.py рядом с этим файлом).
+    Порядок поиска защищает от СТАРЫХ артефактов сборки в чужих workspace
+    (например /nssr_sim/install/arm_ik/lib/arm_ik/arm_ik_node.py с циклическим
+    импортом): приоритет у bin/ этого исходного пакета, затем entry-point
+    console_scripts (`arm_ik` / `demo_*`), и только потом любой собранный .py.
     """
+    pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # 1) свежий standalone-бинарь из ИСХОДНИКОВ этого пакета
+    for cand_name in (name, name.replace(".py", "")):
+        src_bin = os.path.join(pkg_root, "bin", cand_name)
+        if os.path.exists(src_bin):
+            return src_bin
+    # 2) собранный entry_point (console_scripts) текущего пакета
     try:
-        prefix = get_package_prefix("arm_ik")           # установлен ли пакет
-        libexec = os.path.join(prefix, "lib", "arm_ik", name)
-        if os.path.exists(libexec):
-            return libexec
+        prefix = get_package_prefix("arm_ik")
+        base = name.replace(".py", "")
+        for cand in ("arm_ik" if base == "arm_ik_node" else base, base):
+            libexec = os.path.join(prefix, "lib", "arm_ik", cand)
+            if os.path.exists(libexec) and \
+               os.path.realpath(os.path.dirname(libexec)) != os.path.realpath(prefix):
+                # не берём старые wrapper'ы из чужого install/, если они там есть
+                pass
+            if os.path.exists(libexec):
+                with open(libexec, "rb") as f:
+                    head = f.read(4096)
+                if b"from arm_ik.arm_ik_node import main" not in head:  # старый битый wrapper
+                    return libexec
     except Exception:
         pass
-    src_bin = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           "bin", name)
-    if os.path.exists(src_bin):
-        return src_bin
     return name  # пусть launch даст стандартную ошибку
 
 

@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Standalone launcher: works without colcon build (sys.path bootstrap).
+Usage: ./bin/arm_ik_node.py  OR  ros2 run via this script directly.
+
+IMPORTANT: rclpy lives only in the system python3 (/usr/lib/python3/dist-packages),
+so we re-exec under /usr/bin/python3 if a ROS-savvy interpreter is not already active.
+"""
+import os, sys, glob
+
+def _has_rclpy():
+    try:
+        import rclpy  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+if not _has_rclpy():
+    for py in ("/usr/bin/python3", "/usr/bin/python3.10", "/usr/bin/python3.8"):
+        if os.path.exists(py):
+            os.execv(py, [py] + sys.argv)
+    sys.stderr.write("rclpy not found. Run inside a sourced ROS 2 environment "
+                     "(source /opt/ros/humble/setup.bash).\n")
+    sys.exit(1)
+
+def _find_pkg_root():
+    # из исходников: <pkg>/bin/arm_ik ; из сборки: <ws>/install/arm_ik/lib/arm_ik/arm_ik
+    here = os.path.dirname(os.path.abspath(__file__))
+    cand = [os.path.dirname(here),                                    # pkg/bin -> pkg
+            os.path.abspath(os.path.join(here, "..", "..", "src", "arm_ik"))]
+    for c in glob.glob("/home/user/nssr-polygon/hackathon/**/arm_ik/arm_ik", recursive=True):
+        cand.append(os.path.dirname(c))
+    import subprocess
+    try:
+        p = subprocess.run(["ros2", "pkg", "prefix", "--share-path", "arm_ik"],
+                           capture_output=True, text=True, timeout=5)
+    except Exception:
+        p = None
+    for c in cand + ([os.path.dirname(p.stdout.strip())] if p and p.returncode == 0 else []):
+        if os.path.exists(os.path.join(c, "arm_ik", "nodes", "arm_ik_node.py")):
+            return c
+    return os.path.dirname(here)
+
+PKG_ROOT = _find_pkg_root()
+# If an OLD broken wrapper shadows our package (same file name in libexec dir),
+# drop that directory from sys.path so 'arm_ik' resolves to PKG_ROOT/arm_ik.
+for p in list(sys.path):
+    if os.path.basename(p.rstrip("/")) == "arm_ik" and os.path.isdir(p):
+        sys.path.remove(p)
+if PKG_ROOT not in sys.path:
+    sys.path.insert(0, PKG_ROOT)
+
+from arm_ik.nodes.arm_ik_node import main
+if __name__ == "__main__":
+    main()

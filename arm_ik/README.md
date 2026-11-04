@@ -91,13 +91,31 @@ ros2 launch arm_ik arm_ik.launch.py
 
 ### 2.1 Быстрый запуск без colcon build (если сборка упорно не проходит)
 
-Ноды можно запускать напрямую — скрипты в `bin/` сами добавляют путь к пакету:
+Ноды можно запускать напрямую — скрипты в `bin/` сами добавляют путь к пакету
+и при необходимости перезапускаются под интерпретатором, в котором есть `rclpy`
+(`/usr/bin/python3`, системные пакеты ROS):
 
 ```bash
 source /opt/ros/humble/setup.bash          # только ROS, workspace не нужен
 cd <путь>/arm_ik
-./bin/arm_ik_node.py --ros-args -p use_sim_time:=true -p h_table:=0.9 &
-./bin/demo_goal_publisher.py --ros-args -p use_sim_time:=true   # опционально
+python3 ./bin/arm_ik_node.py --ros-args -p use_sim_time:=true -p h_table:=0.9 &
+python3 ./bin/demo_goal_publisher.py --ros-args -p use_sim_time:=true   # опционально
+```
+
+Если появляется `ModuleNotFoundError: No module named 'rclpy'` — значит нода
+стартует от «чужого» python (venv/conda). Быстрая проверка и лечение:
+
+```bash
+which python3                              # должен быть /usr/bin/python3
+/usr/bin/python3 -c "import rclpy; print('rclpy ok')"
+# если в venv: deactivate; если conda: conda deactivate
+```
+
+После нормальной сборки (`colcon build`) preferred-way — без расширения:
+```bash
+ros2 run arm_ik arm_ik_node                # entry_point console_scripts
+# или standalone-бинарь, ставящийся в lib/arm_ik/:
+install/<ws>/lib/arm_ik/arm_ik --ros-args -p use_sim_time:=true
 ```
 
 launch-файл тоже умеет работать из исходников: `_node_exec()` сначала ищет

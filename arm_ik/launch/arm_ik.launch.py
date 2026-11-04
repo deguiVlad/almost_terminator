@@ -50,8 +50,6 @@ def launch_setup(context, *args, **kwargs):
 
     params = {
         "use_sim_time": b("use_sim_time"),
-        "tree_source": LaunchConfiguration("tree_source").perform(context),
-        "model_path": LaunchConfiguration("model_path").perform(context),
         "rate_hz": float(LaunchConfiguration("rate_hz").perform(context)),
         "spd_limit": float(LaunchConfiguration("spd_limit").perform(context)),
         "h_table": float(LaunchConfiguration("h_table").perform(context)),
@@ -85,7 +83,6 @@ def generate_launch_description():
     d = lambda name, val, desc="": DeclareLaunchArgument(name, default_value=val, description=desc)
     return LaunchDescription([
         d("use_sim_time", "true", "время из /clock (симулятор)"),
-        d("model_path", "", "путь к config/arms.json (пусто — из share пакета)"),
         d("rate_hz", "50", "частота контура и генерации траектории"),
         d("spd_limit", "0.8", "жёсткий лимит скорости моторов рук, рад/с"),
         d("h_table", "0.9", "высота поверхности стола над pelvis, м"),
@@ -94,7 +91,7 @@ def generate_launch_description():
         d("tol_rot", "0.05", "допуск по ориентации, рад"),
         d("kp", "0.6", "усиление P-коррекции недолёта ПД-приводов"),
         d("table_guard", "true", "включить защиту от стола"),
-        d("tcp_offset", "", "смещение TCP от frame запястья x,y,z (пусто — из arms.json)"),
+        d("tcp_offset", "", "смещение TCP от frame запястья x,y,z (пусто — из цепочки /tf)"),
         d("delta_reference", "measured", "опора delta-целей: measured | last_goal"),
         d("delta_accumulate", "false", "суммировать серию delta-смещений"),
         d("demo", "false", "нода сама публикует абсолютные цели (PoseStamped)"),

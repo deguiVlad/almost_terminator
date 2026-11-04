@@ -4,6 +4,6 @@
 Usage: ./bin/demo_goal_publisher.py  OR  ros2 run via this script directly."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from arm_ik.demo_goal_publisher import main
+from arm_ik.nodes.demo_goal_publisher import main
 if __name__ == "__main__":
     main()

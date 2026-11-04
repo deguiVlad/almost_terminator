@@ -26,8 +26,8 @@ setup(
     entry_points={
         "console_scripts": [
             "arm_ik_node = arm_ik.nodes.arm_ik_node:main",
-            "demo_goal_publisher = arm_ik.demo_goal_publisher:main",
-            "demo_delta_publisher = arm_ik.demo_delta_publisher:main",
+            "demo_goal_publisher = arm_ik.nodes.demo_goal_publisher:main",
+            "demo_delta_publisher = arm_ik.nodes.demo_delta_publisher:main",
             "export_kinematics_from_urdf = scripts.export_kinematics_from_urdf:main",
         ],
     },

@@ -27,8 +27,8 @@ docs (PoseStamped | TwistStamped)            /joint_states
 | `arm_ik/collision.py` | `TableGuard`: стол как полуплоскость; клампинг цели, мягкий барьерный градиент внутрь IK, жёсткая проверка точек траектории. |
 | `arm_ik/trajectory.py` | `joint_space_profile`: трапециевидный профиль в пространстве суставов с гарантией \|dq/dt\| ≤ v_max. |
 | `arm_ik/nodes/arm_ik_node.py` | ROS 2 узел: топики целей (абсолютные и delta), сервис `~/solve`, цикл исполнения 50 Гц, фазы traj→fine→reached, телеметрия. |
-| `arm_ik/demo_goal_publisher.py` | Демо абсолютных целей (PoseStamped). |
-| `arm_ik/demo_delta_publisher.py` | Демо шестимерных смещений (TwistStamped). |
+| `arm_ik/nodes/demo_goal_publisher.py` | Демо абсолютных целей (PoseStamped). |
+| `arm_ik/nodes/demo_delta_publisher.py` | Демо шестимерных смещений (TwistStamped). |
 | `bin/arm_ik_node.py`, `bin/demo_goal_publisher.py`, `bin/demo_delta_publisher.py` | Standalone-запускалки нод: исполняемые скрипты с shebang и bootstrap'ом `sys.path` — работают **без colcon build** (`./bin/arm_ik_node.py`). Копируются в `lib/arm_ik/` при сборке. |
 | `scripts/export_kinematics_from_urdf.py` | Извлекает точные origin/axis/limits обеих рук из URDF → `config/arms.json`. |
 | `config/arms_template.json` | Шаблон модели (топология tiangong_pro + пределы из docs); заменить файлом из URDF! |

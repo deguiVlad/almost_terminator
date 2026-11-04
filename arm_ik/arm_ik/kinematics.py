@@ -362,7 +362,7 @@ def delta_to_T(T_ref, dpos=None, drot=None, base_ref=True, delta6=None):
 
 
 # ---------------------------------------------------------------------------
-# Встроенные модели рук TienKung 2.0 Pro (Шаблон; обновить из URDF!)
+# Встроенные модели рук TienKung 2.0 Pro (стартовая заглушка до TF-дерева)
 # ---------------------------------------------------------------------------
 
 _ARM_LIMITS = {
@@ -379,20 +379,13 @@ _ARM_LIMITS = {
 }
 
 
-def load_arm_config(path):
-    """Загружает ВЕСЬ конфиг arms.json как dict {'left': ArmModel, 'right': ArmModel}."""
-    import json
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    out = {}
-    for key in ("left", "right"):
-        if key in data:
-            out[key] = arm_from_dict(data[key])
-    return out
-
-
 def arm_from_dict(d):
-    """Собирает ArmModel из словаря (формат config/arms.json, выгруженный из URDF)."""
+    """Собирает ArmModel из словаря конфигурации цепочки.
+
+    Единственный поставщик этого dict в рантайме — arm_ik.tree_from_tf
+    (кинематическое дерево из топиков симулятора /tf + /tf_static);
+    файловые конфиги (URDF/JSON) пакет больше не читает.
+    """
     joints = []
     for jd in d["joints"]:
         lo, up = jd["limits"]
@@ -406,33 +399,6 @@ def arm_from_dict(d):
         side=d["side"], joints=joints, tip_link=d["tip_link"],
         base_frame=d.get("base_frame", "pelvis"),
         tcp_offset=np.array(d.get("tcp_offset", [0.0, 0.0, 0.0]), dtype=float))
-
-
-def load_arm_model(path=None, side="right"):
-    """Возвращает модель руки.
-
-    Основной источник дерева звеньев — топики симулятора /tf + /tf_static
-    (см. arm_ik.tree_from_tf); файлы для построения кинематики больше НЕ нужны.
-    Здесь остаются только два вспомогательных пути:
-
-      * path=None — встроенная стартовая модель (make_default_arm): используется
-        как заглушка до получения TF-дерева и в офлайн-тестах;
-      * path=<файл> — явный отладочный JSON в формате arms_template.json
-        (только по явному параметру ноды model_path; автопоиска файлов нет).
-    """
-    import json
-    import os
-    if path:
-        full_path = os.path.abspath(os.path.expanduser(path))
-        if not os.path.exists(full_path):
-            raise FileNotFoundError(
-                f"model_path не найден: {full_path}. По умолчанию дерево звеньев "
-                f"берётся из /tf + /tf_static (tree_source:=tf) и файл не требуется.")
-        with open(full_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        key = "left" if side == "left" else "right"
-        return arm_from_dict(data[key])
-    return make_default_arm(side)
 
 
 def make_default_arm(side: str) -> ArmModel:

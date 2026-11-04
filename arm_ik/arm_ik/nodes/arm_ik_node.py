@@ -71,7 +71,7 @@ except ImportError:  # graceful degradation: нода стартует и счи
     SetMotorPosition = None
 
 from arm_ik.kinematics import (fk, fk_tcp, geometric_jacobian, ik_dls,
-                               ik_multi_seed, clip_to_limits, load_arm_model,
+                               ik_multi_seed, clip_to_limits, make_default_arm,
                                pose_error, delta_to_T, pose_to_T as mat_from_posquat,
                                _tmat)
 from arm_ik.collision import TableGuard
@@ -126,7 +126,6 @@ class ArmIKNode(Node):
         # use_sim_time объявляется автоматически базовым классом Node (ROS 2 Humble);
         # ручное declare_parameter("use_sim_time", ...) роняло ноду с
         # ParameterAlreadyDeclaredException — не добавлять.
-        self.declare_parameter("model_path", "")       # необязательный отладочный JSON (по умолчанию не используется)
         self.declare_parameter("base_frame", "pelvis")
         self.declare_parameter("rate_hz", 50.0)
         self.declare_parameter("spd_limit", 0.8)       # жёсткий лимит документации
@@ -145,7 +144,9 @@ class ArmIKNode(Node):
         self.declare_parameter("n_seeds", 4)           # альтернативных стартов IK
         self.declare_parameter("tcp_offset", "")         # "x,y,z" поверх TF-цепочки (переопределить кончик)
         # --- источник дерева звеньев для IK ---
-        self.declare_parameter("tree_source", "tf")      # tf | file (file — только отладочный JSON по model_path)
+        # Единственный источник — топики симулятора /tf и /tf_static
+        # (модуль arm_ik.tree_from_tf); файловые режимы (URDF/JSON-конфиги)
+        # из пакета вычищены полностью.
         self.declare_parameter("tf_wait_timeout", 10.0) # с ожидания первого полного дерева TF
         self.declare_parameter("tf_refresh_period", 5.0) # с периодической пересборки цепочки из TF
         # --- параметры delta-целей (TwistStamped на /arm_ik/delta_{left,right}) ---
@@ -168,35 +169,16 @@ class ArmIKNode(Node):
 
         self.base_frame = self.get_parameter("base_frame").value
         # ---------------- источник дерева звеньев для IK ----------------
-        # По умолчанию ("tf") цепочка звеньев строится из топиков симулятора
-        # /tf и /tf_static (см. arm_ik.tree_from_tf); файлы не читаются.
-        # "file" — отладочный режим: одна стартовая модель берётся по явному
-        # пути model_path (JSON в формате arms_template.json) и TF-пересборка
-        # не выполняется.
-        self.tree_source = str(self.get_parameter("tree_source").value).lower()
+        # Цепочка звеньев строится из топиков симулятора /tf и /tf_static
+        # (см. arm_ik.tree_from_tf); файлы URDF/JSON не читаются.
         self.tf_wait_timeout = float(self.get_parameter("tf_wait_timeout").value)
         self.tf_refresh = float(self.get_parameter("tf_refresh_period").value)
-        if self.tree_source == "tf":
-            # стартовые модели — встроенная заглушка (нужны сразу для FK/
-            # телеметрии), затем перезаменяются деревом из /tf+/tf_static,
-            # как только оно появится в буфере.
-            self.models = {"left": load_arm_model(None, "left"),
-                           "right": load_arm_model(None, "right")}
-            self._tf_models_ready = False
-        else:
-            mp = self.get_parameter("model_path").value or None
-            if not mp:
-                self.get_logger().error(
-                    "tree_source:=file требует явного -p model_path:=<arms.json>; "
-                    "по умолчанию дерево звеньев берётся из /tf + /tf_static "
-                    "(tree_source:=tf) и файл не нужен — переключаюсь на tf")
-                self.tree_source = "tf"
-                self.models = {"left": load_arm_model(None, "left"),
-                               "right": load_arm_model(None, "right")}
-                self._tf_models_ready = False
-            else:
-                self.models = {"left": load_arm_model(mp, "left"),
-                               "right": load_arm_model(mp, "right")}
+        # стартовые модели — встроенная заглушка (нужны сразу для FK/телеметрии),
+        # затем перезаменяются деревом из /tf+/tf_static, как только оно появится
+        # в буфере TF2.
+        self.models = {"left": make_default_arm("left"),
+                       "right": make_default_arm("right")}
+        self._tf_models_ready = False
         for m in self.models.values():
             m.base_frame = self.base_frame
         tof = self.get_parameter("tcp_offset").value
@@ -263,19 +245,17 @@ class ArmIKNode(Node):
         self.tf_buffer = tf2_ros.Buffer()
         tf2_ros.TransformListener(self.tf_buffer, self)
 
-        if self.tree_source == "tf":
-            try:  # лимиты суставов по возможности берём из robot_description
-                from std_msgs.msg import String as _StrMsg
-                self.create_subscription(
-                    _StrMsg, "/robot_description", self.on_robot_desc,
-                    rclpy.qos.QoSProfile(
-                        reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
-                        history=rclpy.qos.HistoryPolicy.KEEP_LAST, depth=1,
-                        durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL))
-            except Exception:
-                pass
-            # первая попытка построить дерево — сразу, далее по таймеру step
-            self.try_build_tree_from_tf()
+        try:  # лимиты суставов по возможности берём из robot_description
+            self.create_subscription(
+                String, "/robot_description", self.on_robot_desc,
+                rclpy.qos.QoSProfile(
+                    reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
+                    history=rclpy.qos.HistoryPolicy.KEEP_LAST, depth=1,
+                    durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL))
+        except Exception:
+            pass
+        # первая попытка построить дерево — сразу, далее по таймеру step
+        self.try_build_tree_from_tf()
 
         cbg = ReentrantCallbackGroup()
         if HAVE_SRV:
@@ -304,7 +284,7 @@ class ArmIKNode(Node):
 
         self.get_logger().info(
             f"arm_ik_node ready | tips={[m.tip_link for m in self.models.values()]} | "
-            f"tree={self.tree_source}{' (ждём /tf, /tf_static)' if self.tree_source == 'tf' and not getattr(self, '_tf_models_ready', True) else ''} | "
+            f"tree=/tf+tf_static{' (ждём дерево)' if not self._tf_models_ready else ' (получено)'} | "
             f"guard={'ON h=%.2f' % self.guard.h if self.guard else 'OFF'} | "
             f"srv={'on' if HAVE_SRV else 'off (нет сгенерированного arm_ik.srv)'}")
 
@@ -377,8 +357,6 @@ class ArmIKNode(Node):
         симулятор опубликовал полные /tf+/tf_static — цепочка звеньев
         пересобирается из TF и executor'ы переключаются на новые модели.
         """
-        if self.tree_source != "tf":
-            return False
         now = self.get_clock().now()
         if not force:
             last = self._tf_last_try
@@ -402,9 +380,8 @@ class ArmIKNode(Node):
                 self._tf_timeout_warned = True
                 self.get_logger().error(
                     f"за {self.tf_wait_timeout:.0f} с дерево из /tf+/tf_static не "
-                    "появилось; проверьте robot_state_publisher/симулятор, либо "
-                    "запустите без симулятора: -p tree_source:=file "
-                    "-p model_path:=<arms.json>")
+                    "появилось; проверьте, что симулятор/robot_state_publisher "
+                    "запущены и публикуют TF (единственный источник дерева звеньев)")
             return False
 
         from arm_ik.tree_from_tf import build_models_from_tf
@@ -659,11 +636,10 @@ class ArmIKNode(Node):
     # ------------------------------------------------------------ control loop
     def step(self):
         now = self.get_clock().now().to_msg()
-        if self.tree_source == "tf":
-            # периодическая пересборка дерева звеньев из /tf + /tf_static
-            # (сначала — часто, пока дерево не получено; затем раз в tf_refresh)
-            self.try_build_tree_from_tf()
-        if self.tree_source == "tf" and not getattr(self, "_clock_checked", False):
+        # периодическая пересборка дерева звеньев из /tf + /tf_static
+        # (сначала — часто, пока дерево не получено; затем раз в tf_refresh)
+        self.try_build_tree_from_tf()
+        if not getattr(self, "_clock_checked", False):
             self._check_sim_clock()
         for side, model in self.models.items():
             ex = self.exec[side]

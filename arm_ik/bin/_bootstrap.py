@@ -1,17 +1,21 @@
 # -*- coding: utf-8 -*-
 """Bootstrap для запуска нод arm_ik из bin/ или install/lib/arm_ik/.
 
-Решает три проблемы, которые по очереди ломали запуск:
+Решает все проблемы запуска, которые встречались по ходу отладки:
+
 1) ImportError: circular import — обёртка называлась тем же именем, что и
-   модуль пакета (arm_ik_node.py). Лечится тем, что обёртки называются
-   run_*.py, а импорт идёт из arm_ik.nodes.*.
-2) ModuleNotFoundError: No module named 'rclpy' — скрипт запускался системным
-   python3 без ROS-окружения. Лечится авто-перезапуском под интерпретатором,
-   в котором есть rclpy (см. _find_python_with_rclpy).
-3) ModuleNotFoundError: No module named 'numpy'/'scipy' — тот же rclpy-питон
-   без научных пакетов (например, venv поверх system-site-packages). Лечится
-   поиском подходящего python'а среди нескольких кандидатов и понятной
-   инструкцией по установке в ТОТ интерпретатор, который реально используется.
+   модуль пакета. Лечится тем, что обёртки называются run_*.py, а импорт идёт
+   из arm_ik.nodes.*.
+2) ModuleNotFoundError: No module named 'rclpy' — запуск системным python без
+   ROS-окружения. Лечится авто-перезапуском (os.execv) под интерпретатором,
+   в котором есть rclpy.
+3) ModuleNotFoundError: No module named 'numpy'/'scipy' — с v0.2.3 больше НЕ
+   ошибка: пакет автоматически переключается на чистый Python-fallback
+   (arm_ik/_math_compat.py). Проверка зависимостей ограничена rclpy (+
+   bodyctrl_msgs, если не отключено ARM_IK_REQUIRE_BODYCTRL=0).
+4) Затенение пакета при запуске из libexec: каталог .../install/arm_ik/lib/arm_ik
+   попадает в sys.path[0] и его файлы перекрывают установленный python-пакет
+   `arm_ik`. Лечится вычисткой таких путей перед импортом.
 """
 import os
 import subprocess
@@ -19,7 +23,7 @@ import sys
 
 
 def _candidates():
-    """Интерпретаторы, в которых стоит искать связку rclpy+numpy+scipy."""
+    """Интерпретаторы, в которых стоит искать связку rclpy+... ."""
     out = []
     cur = sys.executable
     if cur:
@@ -34,28 +38,41 @@ def _candidates():
 
 
 def _has(mods, py):
-    code = "import importlib,sys;" + ";".join(
-        f"importlib.import_module('{m}')" for m in mods
-    ) + ";sys.exit(0)"
+    code = ("import importlib,sys;" + ";".join(
+        f"importlib.import_module('{m}')" for m in mods) + ";sys.exit(0)")
     try:
         return subprocess.run([py, "-c", code], capture_output=True).returncode == 0
     except OSError:
         return False
 
 
-def _pick_python():
+def _pick_python(check):
     """Возвращает (python, missing). missing==[] если всё найдено."""
     best_missing = None
     for py in _candidates():
-        for need in (("rclpy",), ("rclpy", "numpy"), ("rclpy", "numpy", "scipy")):
-            pass
-        # считаем, чего не хватает в этом python'е
-        missing = [m for m in ("rclpy", "numpy", "scipy") if not _has([m], py)]
+        missing = [m for m in check if not _has([m], py)]
         if not missing:
             return py, []
         if best_missing is None or len(missing) < len(best_missing[1]):
             best_missing = (py, missing)
-    return best_missing[0], best_missing[1]
+    return best_missing
+
+
+def _strip_shadowing_paths(here):
+    """Убрать из sys.path libexec-каталоги пакетов arm_ik* и сам here.
+
+    Если их оставить, `import arm_ik` может найти вместо настоящего пакета
+    одноимённый каталог lib/arm_ik (или bootstrap затеняет модули), что и
+    давало циклические импорты/ModuleNotFoundError на собранной машине.
+    """
+    def bad(p):
+        ap = os.path.abspath(p) if p else ""
+        if ap == here:
+            return True
+        base = os.path.basename(ap)
+        parent = os.path.basename(os.path.dirname(ap))
+        return base.startswith("arm_ik") and parent == "lib"
+    sys.path[:] = [p for p in sys.path if not bad(p)]
 
 
 def bootstrap(module_name):
@@ -63,22 +80,51 @@ def bootstrap(module_name):
 
     module_name: 'arm_ik_node' | 'demo_goal_publisher' | 'demo_delta_publisher'
     """
+    here = os.path.dirname(os.path.abspath(__file__))
+    _strip_shadowing_paths(here)
     pkg_root = _find_pkg_root()
     if pkg_root and pkg_root not in sys.path:
         sys.path.insert(0, pkg_root)
 
-    missing = [m for m in ("rclpy", "numpy", "scipy") if _try_import(m) is None]
+    check = ["rclpy"]
+    # bodyctrl_msgs по умолчанию не проверяем: нода умеет работать без него
+    # (печатает предупреждение и использует стандартные JointTrajectory-выходы).
+    if os.environ.get("ARM_IK_REQUIRE_BODYCTRL", "0") == "1":
+        check.append("bodyctrl_msgs")
+    missing = [m for m in check if _try_import(m) is None]
     if missing:
         # пробуем перезапуститься под python'ом, где всё есть
         if os.environ.get("ARM_IK_REEXEC") != "1":
-            py, still_missing = _pick_python()
-            if py and py != sys.executable and not still_missing:
-                os.environ["ARM_IK_REEXEC"] = "1"
-                os.execv(py, [py] + sys.argv)
+            picked = _pick_python(check)
+            if picked is not None:
+                py, still_missing = picked
+                if py and py != sys.executable and not still_missing:
+                    os.environ["ARM_IK_REEXEC"] = "1"
+                    try:
+                        os.execv(py, [py] + sys.argv)
+                    except OSError:
+                        pass
         _die_install(missing)
 
     import importlib
-    mod = importlib.import_module(f"arm_ik.nodes.{module_name}")
+    try:
+        mod = importlib.import_module(f"arm_ik.nodes.{module_name}")
+    except ImportError as e:
+        print(
+            "arm_ik: не могу импортировать arm_ik.nodes.%s: %s\n"
+            "  sys.path[0..3] = %s\n"
+            "  артефакт запущен из: %s\n"
+            "  Вероятно, запущена СТАРАЯ сборка пакета (или пакет вообще не\n"
+            "  собран/не source'нут). Лечится так:\n"
+            "    rm -rf <ws>/build/arm_ik <ws>/install/arm_ik\n"
+            "    (удалите также старые копии в других workspace, напр.\n"
+            "     rm -rf /nssr_sim/install/arm_ik /nssr_sim/build/arm_ik)\n"
+            "    cd <ваш_ws> && colcon build --packages-select arm_ik\n"
+            "    source install/setup.bash   # последним!\n"
+            "  либо запускайте напрямую из исходников: ./bin/run_arm_ik.py\n"
+            % (module_name, e, sys.path[:4], os.path.abspath(__file__)),
+            file=sys.stderr)
+        raise
     return getattr(mod, "main")
 
 
@@ -93,25 +139,29 @@ def _try_import(name):
 def _find_pkg_root():
     """Каталог, содержащий пакет arm_ik (рядом с bin/ или lib/arm_ik/...)."""
     here = os.path.dirname(os.path.abspath(__file__))
-    for base in (os.path.dirname(here), here, os.getcwd()):
+    bases = [os.path.dirname(here)]                      # bin/../ или lib/arm_ik/../../.. ?
+    b = os.path.dirname(os.path.dirname(here))           # lib/<pkg>/../ -> install prefix
+    bases.append(b)
+    bases.append(os.path.dirname(b))                     # ещё уровнем выше
+    bases.append(os.getcwd())
+    for base in bases:
         if os.path.isdir(os.path.join(base, "arm_ik")) and os.path.isfile(
-            os.path.join(base, "arm_ik", "__init__.py")
-        ):
+                os.path.join(base, "arm_ik", "__init__.py")):
             return base
-    # install-вариант: .../install/arm_ik/lib/arm_ik/run_x.py -> .../site-packages уже в sys.path
     return None
 
 
 def _die_install(missing):
     print(
         "arm_ik: в интерпретаторе {py} не хватает модулей: {miss}.\n"
-        "Установите ИХ В ЭТОТ python:\n"
-        "  sudo apt install python3-numpy python3-scipy\n"
-        "  {py} -m pip install numpy scipy\n"
-        "(если rclpy тоже отсутствует — source /opt/ros/humble/setup.bash\n"
-        " перед запуском; либо укажите нужный интерпретатор: ARM_IK_PYTHON=/usr/bin/python3)".format(
-            py=sys.executable, miss=", ".join(missing)
-        ),
+        "Скорее всего ROS-окружение не source'нуто. Выполните:\n"
+        "  source /opt/ros/humble/setup.bash\n"
+        "  source <ваш_ws>/install/setup.bash   # последним\n"
+        "и повторите запуск; либо укажите интерпретатор явно:\n"
+        "  ARM_IK_PYTHON=/usr/bin/python3 ./bin/run_arm_ik.py\n"
+        "(numpy/scipy ставить НЕ нужно — включается pure-python режим;\n"
+        " bodyctrl_msgs можно сделать необязательным: ARM_IK_REQUIRE_BODYCTRL=0)".format(
+            py=sys.executable, miss=", ".join(missing)),
         file=sys.stderr,
     )
     sys.exit(1)

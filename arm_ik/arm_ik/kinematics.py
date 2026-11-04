@@ -220,13 +220,27 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
     return q, ok, hist
 
 
-def ik_multi_seed(model: ArmModel, T_des44, seeds, **kw):
+def ik_multi_seed(model: ArmModel, T_des44, seeds, n_seeds=None, jitter=None, **kw):
     """Перебор стартовых поз (боремся с локальными минимумами DLS).
 
+    seeds — 2D-список/массив стартов; либо один seed (тогда можно передать
+    n_seeds>1 — к нему добавятся случайные возмущения jitter рад).
     Берём решение с минимальной ошибкой; при равенстве — ближайшее к seeds[0]
     (обычно текущая измеренная поза => минимум движения).
     Возвращает (q, ok, err_pos, err_rot).
     """
+    import random as _rnd
+    seeds = [np.asarray(s, dtype=float) for s in seeds]         if len(np.shape(seeds)) == 2 else [np.asarray(seeds, dtype=float)]
+    if n_seeds and n_seeds > len(seeds):
+        base = seeds[0]
+        amp = 0.5 if jitter is None else float(jitter)
+        rng = _rnd.Random(0)
+        while len(seeds) < n_seeds:
+            s = np.array([float(v) for v in base])
+            for i in range(len(s)):
+                s[i] = min(max(s[i] + rng.uniform(-amp, amp),
+                               float(model.lower[i])), float(model.upper[i]))
+            seeds.append(s)
     best, best_key = None, None
     for s in seeds:
         q, ok, hist = ik_dls(model, T_des44, s, **kw)
@@ -259,21 +273,41 @@ def pose_to_T(pos, quat_wxyz):
     return T
 
 
-def delta_to_T(T_ref, dpos, drot):
+def delta_to_T(T_ref, dpos=None, drot=None, base_ref=True, delta6=None):
     """Целевая поза из опорной и 6-мерного смещения (delta goal).
 
-    dpos — смещение позиции в метрах; drot — малое вращение как rotation vector
-    (ось*угол, радианы). Оба задаются в системе base_frame (pelvis), т.е.
-    «относительно корпуса», что согласуется с PoseStamped-целями того же узла.
-
-        T_new.p = T_ref.p + dpos
-        T_new.R = Rot(drot) @ T_ref.R   (вращение «в мире базы»)
+    Аргументы (два стиля вызова):
+      delta_to_T(T_ref, dpos, drot)          — dpos(3)/drot(3) отдельно;
+      delta_to_T(T_ref, delta6)              — один 6-вектор [dx,dy,dz,rx,ry,rz];
+      base_ref=True   (по умолчанию): dpos и drot заданы в системе base_frame
+                      (pelvis): p_new = p_ref + dpos; R_new = Rot(drot) @ R_ref.
+      base_ref=False  — «локальная» дельта: смещение в осях текущей ориентации
+                      кисти, вращение постумножением R_new = R_ref @ Rot(drot).
     """
+    if delta6 is not None and dpos is None:
+        d6 = np.asarray(delta6, dtype=float)
+        dpos, drot = d6[:3], d6[3:]
+    if dpos is None:
+        dpos = np.zeros(3)
     dpos = np.asarray(dpos, dtype=float)
+    # convenience: один 6-вектор [dx,dy,dz,rx,ry,rz] передан как dpos
+    if (drot is None or len(np.asarray(drot)) == 0) and len(dpos) == 6:
+        drot, dpos = dpos[3:], dpos[:3]
+    if drot is None:
+        drot = np.zeros(3)
     drot = np.asarray(drot, dtype=float)
+    if len(dpos) != 3:
+        raise ValueError("dpos должен быть 3-мерным (или передайте 6-вектор delta одним аргументом)")
+    if len(drot) != 3:
+        raise ValueError("drot должен быть 3-мерным (rotation vector)")
     T = np.array(T_ref, dtype=float).copy()
-    T[:3, :3] = Rotation.from_rotvec(drot).as_matrix() @ T_ref[:3, :3]
-    T[:3, 3] = T_ref[:3, 3] + dpos
+    R_delta = Rotation.from_rotvec(drot).as_matrix()
+    if base_ref:
+        T[:3, :3] = R_delta @ T_ref[:3, :3]
+        T[:3, 3] = T_ref[:3, 3] + dpos
+    else:
+        T[:3, :3] = T_ref[:3, :3] @ R_delta
+        T[:3, 3] = T_ref[:3, 3] + T_ref[:3, :3] @ dpos
     return T
 
 
@@ -293,6 +327,18 @@ _ARM_LIMITS = {
     "wrist_roll_L": (-1.66, 1.31),
     "wrist_roll_R": (-1.31, 1.66),
 }
+
+
+def load_arm_config(path):
+    """Загружает ВЕСЬ конфиг arms.json как dict {'left': ArmModel, 'right': ArmModel}."""
+    import json
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    out = {}
+    for key in ("left", "right"):
+        if key in data:
+            out[key] = arm_from_dict(data[key])
+    return out
 
 
 def arm_from_dict(d):

@@ -61,21 +61,10 @@ def parse_origin(el):
     return xyz, rpy
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--urdf", default=None,
-                    help="путь к URDF (по умолчанию ищется tiangong_pro_with_hands.urdf)")
-    ap.add_argument("--out", default="../config/arms.json")
-    ap.add_argument("--base", default="pelvis")
-    ap.add_argument("--tcp-offset", default="0.05,0.0,0.0",
-                    help="смещение TCP от frame запястья x,y,z (подобрать по кончику пальцев)")
-    ap.add_argument("--tip-link-left", default=None,
-                    help="имя link-а TCP слева (по умолчанию — лист fixed-цепочки от wrist_roll_l)")
-    ap.add_argument("--tip-link-right", default=None)
-    args = ap.parse_args()
-
-    args.urdf = find_urdf(args.urdf)
-    tree = ET.parse(args.urdf)
+def build_config(urdf_path, base="pelvis", tcp=(0.05, 0.0, 0.0),
+                 tip_link_left=None, tip_link_right=None):
+    """Парсит URDF и возвращает dict конфига arms.json (left/right цепочки по 7 суставов)."""
+    tree = ET.parse(urdf_path)
     root = tree.getroot()
 
     joints = {}
@@ -116,9 +105,14 @@ def main():
             return tagged[0]
         if not kws:
             raise SystemExit(
-                f"В {args.urdf} вообще нет сустава со словом '{kw}'. "
+                f"В URDF вообще нет сустава со словом '{kw}'. "
                 f"Список суставов: {sorted(joints)}\n"
                 f"Подправьте KEYWORDS/MOTOR_IDS в скрипте под фактические имена.")
+        # 3) если в файле представлена только одна рука (например, _l во всех
+        #    именах), для второй стороны берём тот же шаблон — геометрика
+        #    зеркальная, motor_id подставляются из MOTOR_IDS по тегу.
+        if len(kws) == 1 and not tagged:
+            return kws[0]
         raise SystemExit(
             f"Неоднозначно: '{kw}' для стороны '{tag}' -> кандидаты {kws}, "
             f"после фильтра стороны {tagged}")
@@ -129,7 +123,13 @@ def main():
             n = resolve_name(kw, tag)
             jd = dict(joints[n])
             jd["name"] = n
-            jd["motor_id"] = MOTOR_IDS.get(f"{kw}_{tag}_joint", 0)
+            mid = MOTOR_IDS.get(f"{kw}_{tag}_joint", 0)
+            if mid == 0:  # fallback: по суффиксу фактического имени сустава
+                for full, v in MOTOR_IDS.items():
+                    if full.endswith(n):
+                        mid = v
+                        break
+            jd["motor_id"] = mid
             out.append(jd)
         return out
 
@@ -146,20 +146,42 @@ def main():
                 return cur
             cur = nxt[0].find("child").get("link")
 
-    tcp = [float(v) for v in args.tcp_offset.split(",")]
+    tcp = [float(v) for v in (tcp if not isinstance(tcp, str) else tcp.split(","))]
     left_chain, right_chain = chain_for("l"), chain_for("r")
-    data = {
-        "base_frame": args.base,
+    return {
+        "base_frame": base,
         "left": {"side": "left", "joints": left_chain,
-                 "tip_link": args.tip_link_left or find_tip_link(left_chain),
+                 "tip_link": tip_link_left or find_tip_link(left_chain),
                  "tcp_offset": tcp},
         "right": {"side": "right", "joints": right_chain,
-                  "tip_link": args.tip_link_right or find_tip_link(right_chain),
+                  "tip_link": tip_link_right or find_tip_link(right_chain),
                   "tcp_offset": tcp},
     }
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--urdf", default=None,
+                    help="путь к URDF (по умолчанию ищется tiangong_pro_with_hands.urdf)")
+    ap.add_argument("--out", default="../config/arms.json")
+    ap.add_argument("--base", default="pelvis")
+    ap.add_argument("--tcp-offset", default="0.05,0.0,0.0",
+                    help="смещение TCP от frame запястья x,y,z (подобрать по кончику пальцев)")
+    ap.add_argument("--tip-link-left", default=None,
+                    help="имя link-а TCP слева (по умолчанию — лист fixed-цепочки от wrist_roll_l)")
+    ap.add_argument("--tip-link-right", default=None)
+    args = ap.parse_args()
+
+    urdf = find_urdf(args.urdf)
+    data = build_config(urdf, base=args.base, tcp=args.tcp_offset,
+                        tip_link_left=args.tip_link_left,
+                        tip_link_right=args.tip_link_right)
+    import os
+    d = os.path.dirname(os.path.abspath(args.out))
+    os.makedirs(d, exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
-    print(f"OK: записано {args.out} (цепочки l/r по 7 суставов из {args.urdf})")
+    print(f"OK: записано {args.out} (цепочки l/r по 7 суставов из {urdf})")
 
 
 if __name__ == "__main__":

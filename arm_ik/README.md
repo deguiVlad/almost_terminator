@@ -26,7 +26,7 @@ docs (PoseStamped | TwistStamped)            /joint_states
 | `arm_ik/kinematics.py` | Математическое ядро (без ROS): цепочка JointSpec/ArmModel, FK, геометрический Якобиан 6×7, ошибка позы, IK DLS (Levenberg–Marquardt) с пределами/barrier/null-space, multi-seed, `delta_to_T` для смещений. |
 | `arm_ik/collision.py` | `TableGuard`: стол как полуплоскость; клампинг цели, мягкий барьерный градиент внутрь IK, жёсткая проверка точек траектории. |
 | `arm_ik/trajectory.py` | `joint_space_profile`: трапециевидный профиль в пространстве суставов с гарантией \|dq/dt\| ≤ v_max. |
-| `arm_ik/arm_ik_node.py` | ROS 2 узел: топики целей (абсолютные и delta), сервис `~/solve`, цикл исполнения 50 Гц, фазы traj→fine→reached, телеметрия. |
+| `arm_ik/nodes/arm_ik_node.py` | ROS 2 узел: топики целей (абсолютные и delta), сервис `~/solve`, цикл исполнения 50 Гц, фазы traj→fine→reached, телеметрия. |
 | `arm_ik/demo_goal_publisher.py` | Демо абсолютных целей (PoseStamped). |
 | `arm_ik/demo_delta_publisher.py` | Демо шестимерных смещений (TwistStamped). |
 | `bin/arm_ik_node.py`, `bin/demo_goal_publisher.py`, `bin/demo_delta_publisher.py` | Standalone-запускалки нод: исполняемые скрипты с shebang и bootstrap'ом `sys.path` — работают **без colcon build** (`./bin/arm_ik_node.py`). Копируются в `lib/arm_ik/` при сборке. |
@@ -60,6 +60,31 @@ package 'arm_ik' found at '.../install/arm_ik', but libexec directory
 2. сборка без symlink и старый `install/` — надёжнее `colcon build --packages-select arm_ik --symlink-install`;
 3. в другом терминале активирован старый оверлей (`source .../install/setup.bash` из другой копии workspace) — перезейтить `source install/setup.bash` в текущем терминале;
 4. проверьте наличие ноды: `ros2 pkg executables arm_ik` — должны быть `arm_ik_node`, `demo_goal_publisher`, `demo_delta_publisher`, `export_kinematics_from_urdf`.
+
+
+### 2.5. Если ошибка `ImportError: cannot import name 'main' ... circular import`
+
+Причина (исправлена в текущей версии пакета): скрипт-обёртка `lib/arm_ik/arm_ik_node.py`
+импортировал модуль с тем же именем `arm_ik.arm_ik_node`; Python подменял имя модуля
+скриптом (`__main__`) и получал самозамкнутый импорт. Теперь код ноды живёт в
+`arm_ik/nodes/arm_ik_node.py`, а обёртки в `bin/` импортируют `arm_ik.nodes.arm_ik_node`.
+
+Что сделать на вашей машине (обязательно с чистой пересборкой):
+```bash
+cd ~/nssr-polygon            # корень workspace с пакетом arm_ik
+# 1) синхронизировать исправленный пакет (git pull / копирование arm_ik/)
+# 2) вычистить СТАРЫЕ артефакты сборки — именно они содержат битую обёртку:
+rm -rf build/arm_ik install/arm_ik log/build_arm_ik* log/latest_build
+colcon build --packages-select arm_ik --symlink-install
+source install/setup.bash
+# 3) проверка, что импорт резолвится:
+ros2 pkg executables arm_ik
+python3 -c "from arm_ik.nodes.arm_ik_node import main; print('import ok')"
+ros2 launch arm_ik arm_ik.launch.py
+```
+Если после этого снова виден путь `/nssr_sim/install/arm_ik/lib/arm_ik/arm_ik_node.py`
+с прежним содержимым — значит source'ится другое окружение (`/nssr_sim/install/setup.bash`),
+в нём пакет старый: пересоберите arm_ik именно в том workspace, чей setup.bash вы используете.
 
 Запуск вместе с симулятором требует того же окружения, что и остальные пакеты
 команды (`docs/cheatsheet.md`): `export ROS_DOMAIN_ID=146`, `use_sim_time=true`.

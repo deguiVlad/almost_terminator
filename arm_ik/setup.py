@@ -7,7 +7,7 @@ package_name = "arm_ik"
 setup(
     name=package_name,
     version="0.1.0",
-    packages=[package_name],
+    packages=[package_name, f"{package_name}.nodes"],
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml"]),
@@ -25,7 +25,7 @@ setup(
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
-            "arm_ik_node = arm_ik.arm_ik_node:main",
+            "arm_ik_node = arm_ik.nodes.arm_ik_node:main",
             "demo_goal_publisher = arm_ik.demo_goal_publisher:main",
             "demo_delta_publisher = arm_ik.demo_delta_publisher:main",
             "export_kinematics_from_urdf = scripts.export_kinematics_from_urdf:main",

@@ -4,6 +4,6 @@
 Usage: ./bin/arm_ik_node.py  OR  ros2 run via this script directly."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from arm_ik.arm_ik_node import main
+from arm_ik.nodes.arm_ik_node import main
 if __name__ == "__main__":
     main()

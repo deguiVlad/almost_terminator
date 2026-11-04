@@ -11,11 +11,11 @@ package_name = "arm_ik"
 # и Python принимал wrapper за сам модуль (circular import).
 setup(
     name=package_name,
-    version="0.2.0",
+    version="0.2.1",
     packages=[package_name, f"{package_name}.nodes"],
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
-        (f"share/{package_name}", ["package.xml"]),
+        (f"share/{package_name}", ["package.xml", "README.md", "CHANGELOG.md"]),
         (f"share/{package_name}/config", glob.glob("config/*.json")),
         (f"share/{package_name}/launch", glob.glob("launch/*.py")),
         # standalone-скрипты + bootstrap едут в libexec одним куском:

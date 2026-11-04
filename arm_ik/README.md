@@ -17,121 +17,136 @@ docs (PoseStamped | TwistStamped)            /joint_states
         фаза fine: dq = J⁺·Kp·e по энкодерам (недолёт ПД до 15 %) ─┘
 ```
 
+Версии и список изменений — в [CHANGELOG.md](CHANGELOG.md).
+
 ---
 
-## 1. Структура пакета
+## 0. Быстрый старт (правильный порядок команд)
+
+```bash
+# 0) окружение ROS + домен хакатона (или используйте hackathon/tools/ros.sh)
+source /opt/ros/humble/setup.bash
+export ROS_DOMAIN_ID=146
+
+# 1) workspace, в котором лежит пакет arm_ik (у нас это ~/nssr-polygon/hackathon/ros2)
+cd ~/nssr-polygon/hackathon/ros2
+
+# 2) чистая пересборка пакета (обязательно после обновления исходников!)
+rm -rf build/arm_ik install/arm_ik log/build_arm_ik*
+colcon build --packages-select arm_ik --symlink-install
+source install/setup.bash          # source ПОСЛЕДНИМ, чтобы он имел приоритет
+
+# 3) проверка установки
+ros2 pkg prefix arm_ik             # должен показать .../hackathon/ros2/install/arm_ik
+ros2 pkg executables arm_ik        # arm_ik, demo_goal, demo_delta (+ run_*.py в lib/)
+
+# 4) подготовка модели руки из URDF (один раз; см. §4)
+python3 arm_ik/scripts/export_kinematics_from_urdf.py --out arm_ik/config/arms.json
+
+# 5) запуск IK-сервера (постоянная нода, ждёт цели на топиках)
+ros2 launch arm_ik arm_ik.launch.py
+
+# 6) в другом терминале — цель (абсолютная поза или смещение, см. §5)
+ros2 topic pub -1 /arm_ik/goal_right geometry_msgs/msg/PoseStamped \
+  "{header:{frame_id:pelvis}, pose:{position:{x:0.45,y:-0.2,z:1.0}, orientation:{w:1}}}"
+```
+
+Если нет времени на сборку — запуск вообще без colcon (§3, вариант «из исходников»).
+
+## 1. Окружение и типичные грабли с путями
+
+Контейнер симулятора сам использует оверлей `/nssr_sim/install/setup.bash`, в
+котором живёт **старая** копия `arm_ik`. Python и ROS берут пакет из того
+оверлея, который отsource'нут последним / имеет приоритет в `AMENT_PREFIX_PATH`.
+
+Правила:
+
+* `source` делайте в порядке: сначала `/nssr_sim/install/setup.bash` (нужен для
+  `bodyctrl_msgs`), **последним** — свой workspace: `~/nssr-polygon/hackathon/ros2/install/setup.bash`;
+* проверяйте конфликт одной командой:
+  ```bash
+  ros2 pkg prefix arm_ik      # где ROS видит пакет
+  python3 -c "import arm_ik; print(arm_ik.__file__)"   # какой модуль импортируется
+  ```
+  оба пути должны вести в ваш свежий workspace (для второй команды — из его корня);
+* если в логах запуска появляется путь `/nssr_sim/install/arm_ik/...` — вы
+  source'ите старый оверлей: пересоберите пакет в нём
+  (`cd /nssr_sim && rm -rf build/arm_ik install/arm_ik && colcon build --packages-select arm_ik`)
+  или поменяйте порядок `source`;
+* venv/conda ломает доступ к `rclpy` (он только в системном `/usr/bin/python3`):
+  `deactivate` перед запуском. Сам bootstrap при отсутствии rclpy умеет
+  перезапускаться под `/usr/bin/python3` автоматически.
+
+## 2. Структура пакета
 
 | Файл | Роль |
 |---|---|
 | `arm_ik/kinematics.py` | Математическое ядро (без ROS): цепочка JointSpec/ArmModel, FK, геометрический Якобиан 6×7, ошибка позы, IK DLS (Levenberg–Marquardt) с пределами/barrier/null-space, multi-seed, `delta_to_T` для смещений. |
 | `arm_ik/collision.py` | `TableGuard`: стол как полуплоскость; клампинг цели, мягкий барьерный градиент внутрь IK, жёсткая проверка точек траектории. |
 | `arm_ik/trajectory.py` | `joint_space_profile`: трапециевидный профиль в пространстве суставов с гарантией \|dq/dt\| ≤ v_max. |
-| `arm_ik/nodes/arm_ik_node.py` | ROS 2 узел: топики целей (абсолютные и delta), сервис `~/solve`, цикл исполнения 50 Гц, фазы traj→fine→reached, телеметрия. |
+| `arm_ik/nodes/arm_ik_node.py` | ROS 2 узел (код ноды!): топики целей (абсолютные и delta), сервис `~/solve`, цикл исполнения 50 Гц, фазы traj→fine→reached, телеметрия. |
 | `arm_ik/nodes/demo_goal_publisher.py` | Демо абсолютных целей (PoseStamped). |
 | `arm_ik/nodes/demo_delta_publisher.py` | Демо шестимерных смещений (TwistStamped). |
-| `bin/arm_ik_node.py`, `bin/demo_goal_publisher.py`, `bin/demo_delta_publisher.py` | Standalone-запускалки нод: исполняемые скрипты с shebang и bootstrap'ом `sys.path` — работают **без colcon build** (`./bin/arm_ik_node.py`). Копируются в `lib/arm_ik/` при сборке. |
+| `bin/run_arm_ik.py`, `bin/run_demo_goal.py`, `bin/run_demo_delta.py` | Standalone-запускалки. Имена намеренно НЕ совпадают с именами модулей — это исключает circular import. Работают из исходников и из `install/.../lib/arm_ik/`. |
+| `bin/_bootstrap.py` | Единый bootstrap: поиск пакета-исходников, чистка sys.path от битых старых сборок, перезапуск под python с rclpy, человекочитаемые ошибки вместо трейсбеков. |
 | `scripts/export_kinematics_from_urdf.py` | Извлекает точные origin/axis/limits обеих рук из URDF → `config/arms.json`. |
 | `config/arms_template.json` | Шаблон модели (топология tiangong_pro + пределы из docs); заменить файлом из URDF! |
-| `srv/SolveIK.srv` | Сервис «решить IK без движения» (см. §6 про сборку srv). |
-| `test/test_kinematics.py` | 10 офлайн-тестов ядра (FK/Якобиан/IK/траектория/стол/delta). |
+| `launch/arm_ik.launch.py` | Запуск сервера (+опционально демо); сам находит исполняемый (исходники → entry_point → libexec). |
+| `srv/SolveIK.srv` | Сервис «решить IK без движения» (см. §7 про сборку srv). |
+| `test/test_kinematics.py` | 11 офлайн-тестов ядра (FK/Якобиан/IK/траектория/стол/delta). |
+| `pytest.ini` | Отключает сторонний плагин libtmux (ломает pytest≥9). |
 
-## 2. Установка и сборка
+## 3. Установка, сборка, запуск
+
+### 3.1 Нормальный путь (colcon)
 
 ```bash
-# зависимости: ros2 humble, python3-numpy, python3-scipy (входят в desktop образ)
-cd <ws>/src
-git clone <этот пакет> arm_ik      # или скопируйте папку
-colcon build --packages-select arm_ik
-source install/setup.bash
-```
-
-**Обязательно пересобирать пакет после любой правки в `setup.py`** (например, при
-добавлении исполняемых скриптов) и после добавления новых файлов в `config/` или
-`launch/`. Без пересборки в `install/arm_ik/lib/arm_ik/` не появляется директория
-`libexec`, и `ros2 launch` падает с ошибкой вида:
-
-```
-package 'arm_ik' found at '.../install/arm_ik', but libexec directory
-'.../install/arm_ik/lib/arm_ik' does not exist
-```
-
-Причины этой ошибки:
-1. пакет собран до появления `entry_points`/`data_files` — сделать `colcon build --packages-select arm_ik`;
-2. сборка без symlink и старый `install/` — надёжнее `colcon build --packages-select arm_ik --symlink-install`;
-3. в другом терминале активирован старый оверлей (`source .../install/setup.bash` из другой копии workspace) — перезейтить `source install/setup.bash` в текущем терминале;
-4. проверьте наличие ноды: `ros2 pkg executables arm_ik` — должны быть `arm_ik_node`, `demo_goal_publisher`, `demo_delta_publisher`, `export_kinematics_from_urdf`.
-
-
-### 2.5. Если ошибка `ImportError: cannot import name 'main' ... circular import`
-
-Причина (исправлена в текущей версии пакета): скрипт-обёртка `lib/arm_ik/arm_ik_node.py`
-импортировал модуль с тем же именем `arm_ik.arm_ik_node`; Python подменял имя модуля
-скриптом (`__main__`) и получал самозамкнутый импорт. Теперь код ноды живёт в
-`arm_ik/nodes/arm_ik_node.py`, а обёртки в `bin/` импортируют `arm_ik.nodes.arm_ik_node`.
-
-Что сделать на вашей машине (обязательно с чистой пересборкой):
-```bash
-cd ~/nssr-polygon            # корень workspace с пакетом arm_ik
-# 1) синхронизировать исправленный пакет (git pull / копирование arm_ik/)
-# 2) вычистить СТАРЫЕ артефакты сборки — именно они содержат битую обёртку:
-rm -rf build/arm_ik install/arm_ik log/build_arm_ik* log/latest_build
+cd <ws>                       # workspace, где лежит папка arm_ik (как пакет, не в src/ тоже ок)
+rm -rf build/arm_ik install/arm_ik log/build_arm_ik*
 colcon build --packages-select arm_ik --symlink-install
 source install/setup.bash
-# 3) проверка, что импорт резолвится:
-ros2 pkg executables arm_ik
-python3 -c "from arm_ik.nodes.arm_ik_node import main; print('import ok')"
+ros2 pkg executables arm_ik   # arm_ik / demo_goal / demo_delta
+```
+
+Запуск (нода — постоянный сервер, см. §8):
+
+```bash
 ros2 launch arm_ik arm_ik.launch.py
+ros2 run arm_ik arm_ik --ros-args -p use_sim_time:=true -p h_table:=0.9   # эквивалент
 ```
-Если после этого снова виден путь `/nssr_sim/install/arm_ik/lib/arm_ik/arm_ik_node.py`
-с прежним содержимым — значит source'ится другое окружение (`/nssr_sim/install/setup.bash`),
-в нём пакет старый: пересоберите arm_ik именно в том workspace, чей setup.bash вы используете.
 
-Запуск вместе с симулятором требует того же окружения, что и остальные пакеты
-команды (`docs/cheatsheet.md`): `export ROS_DOMAIN_ID=146`, `use_sim_time=true`.
-
-### 2.1 Быстрый запуск без colcon build (если сборка упорно не проходит)
-
-Ноды можно запускать напрямую — скрипты в `bin/` сами добавляют путь к пакету
-и при необходимости перезапускаются под интерпретатором, в котором есть `rclpy`
-(`/usr/bin/python3`, системные пакеты ROS):
+### 3.2 Без сборки — напрямую из исходников пакета
 
 ```bash
-source /opt/ros/humble/setup.bash          # только ROS, workspace не нужен
+source /opt/ros/humble/setup.bash && export ROS_DOMAIN_ID=146
 cd <путь>/arm_ik
-python3 ./bin/arm_ik_node.py --ros-args -p use_sim_time:=true -p h_table:=0.9 &
-python3 ./bin/demo_goal_publisher.py --ros-args -p use_sim_time:=true   # опционально
+chmod +x bin/*.py
+./bin/run_arm_ik.py --ros-args -p use_sim_time:=true -p h_table:=0.9 &
 ```
 
-Если появляется `ModuleNotFoundError: No module named 'rclpy'` — значит нода
-стартует от «чужого» python (venv/conda). Быстрая проверка и лечение:
+`_bootstrap.py` сам подключит пакет к `sys.path`, найдёт python с `rclpy` и
+даст понятную ошибку, если окружение не ready.
+
+### 3.3 Разбор ошибок запуска (все три уже исправлены в пакете)
+
+| Симптом | Причина | Лечение |
+|---|---|---|
+| `libexec directory '.../lib/arm_ik' does not exist` | пакет собран до появления скриптов/entry_points, либо старый `install/` | `rm -rf build/arm_ik install/arm_ik && colcon build --packages-select arm_ik --symlink-install && source install/setup.bash` |
+| `ImportError: cannot import name 'main' from partially initialized module 'arm_ik.arm_ik_node' (circular import)` | старая обёртка `lib/arm_ik/arm_ik_node.py` имела то же имя, что модуль, и подменяла его в `sys.modules`. В текущей версии имена разведены (`run_arm_ik.py` ↔ `arm_ik/nodes/arm_ik_node.py`) | удалить СТАРЫЕ артефакты во всех workspace, где собирался пакет: `rm -rf /nssr_sim/{build,install}/arm_ik <ваш_ws>/{build,install}/arm_ik`, затем пересобрать и перезейтить; проверить: `head -8 $(which ...)/install/arm_ik/lib/arm_ik/run_arm_ik.py` и `ros2 pkg prefix arm_ik` |
+| `ModuleNotFoundError: No module named 'rclpy'` | запуск из venv/conda или python без системных пакетов ROS | `deactivate`; `source /opt/ros/humble/setup.bash`; либо запускать `./bin/run_arm_ik.py` (bootstrap перезапустится под `/usr/bin/python3`). Проверка: `/usr/bin/python3 -c "import rclpy; print('ok')"` |
+| Собрано в одном ws, а launch берёт пакет из другого (`/nssr_sim`) | приоритет оверлеев в `AMENT_PREFIX_PATH` | source'ть свой `install/setup.bash` последним; контроль — `ros2 pkg prefix arm_ik` |
+| `python3 -c "from arm_ik.nodes..."` → ModuleNotFoundError | команда запущена вне workspace без `source install/setup.bash` | это нормально: после `source install/setup.bash` импорт работает; standalone-скрипты собирают путь сами |
+
+Диагностика одним блоком:
 
 ```bash
-which python3                              # должен быть /usr/bin/python3
-/usr/bin/python3 -c "import rclpy; print('rclpy ok')"
-# если в venv: deactivate; если conda: conda deactivate
+ros2 pkg prefix arm_ik
+ls install/arm_ik/lib/arm_ik/
+grep -n "import" install/arm_ik/lib/arm_ik/run_arm_ik.py
+python3 -c "import arm_ik, arm_ik.nodes.arm_ik_node as m; print(m.__file__)"
 ```
 
-После нормальной сборки (`colcon build`) preferred-way — без расширения:
-```bash
-ros2 run arm_ik arm_ik_node                # entry_point console_scripts
-# или standalone-бинарь, ставящийся в lib/arm_ik/:
-install/<ws>/lib/arm_ik/arm_ik --ros-args -p use_sim_time:=true
-```
-
-launch-файл тоже умеет работать из исходников: `_node_exec()` сначала ищет
-исполняемый в собранном `lib/arm_ik/`, а при его отсутствии берёт `bin/*.py`
-рядом с исходным пакетом. Но сам `ros2 launch arm_ik ...` требует, чтобы пакет
-хотя бы раз был собран (ament должен знать `arm_ik`) — для совсем «без сборки»
-запускайте ноды напрямую из `bin/`, как выше.
-
-Полезная диагностика:
-```bash
-ros2 pkg executables arm_ik                 # список установленных нод
-ls install/arm_ik/lib/arm_ik/               # должны лежать *.py из bin/ и scripts/
-python3 -c "from ament_index_python.packages import get_package_prefix; print(get_package_prefix('arm_ik'))"
-```
-
-## 3. Подготовка модели руки (обязательно перед боем)
+## 4. Подготовка модели руки (обязательно перед боем)
 
 Шаблонные длины звеньев в `arms_template.json` приблизительны. Снимите точные
 параметры из URDF робота:
@@ -157,14 +172,15 @@ python3 scripts/export_kinematics_from_urdf.py --urdf /tmp/robot.urdf --out conf
 он напечатает список всех суставов — допишите реальное имя в `KEYWORDS`/`MOTOR_IDS`.
 
 Узел автоматически подхватит `config/arms.json` (или путь из параметра
-`model_path`; launch ищет его в share-папке пакета).
+`model_path`; launch ищет его в share-папке пакета). При правке `config/`
+пересоберите пакет (`--symlink-install` подхватывает изменения json на лету).
 
 Высота стола задаётся параметром `h_table` (м, над `pelvis`) и прямоугольником
 `table_x0/x1/y_half` — измерьте один раз по TF/линейке или по позам объектов.
 
-## 4. Интерфейсы узла
+## 5. Интерфейсы узла
 
-### 4.1 Абсолютная поза: `geometry_msgs/PoseStamped` на `/arm_ik/goal_left|goal_right`
+### 5.1 Абсолютная поза: `geometry_msgs/PoseStamped` на `/arm_ik/goal_left|goal_right`
 
 Шестимерное положение TCP кисти. `header.frame_id` — любая рамка дерева TF
 (узел перенесёт в `pelvis` через TF2); пустая/`pelvis` — уже в корпусе.
@@ -177,7 +193,7 @@ ros2 topic pub -1 /arm_ik/goal_right geometry_msgs/msg/PoseStamped "{
          orientation: {x: 0.7071, y: 0.0, z: 0.0, w: 0.7071}}}"
 ```
 
-### 4.2 Смещение: `geometry_msgs/TwistStamped` на `/arm_ik/delta_left|delta_right`
+### 5.2 Смещение: `geometry_msgs/TwistStamped` на `/arm_ik/delta_left|delta_right`
 
 Шестимерное **относительное** смещение текущей позы TCP:
 * `twist.linear.{x,y,z}` — dxyz в метрах, ось = `base_frame` (pelvis: x вперёд, y влево, z вверх);
@@ -216,11 +232,11 @@ ros2 topic pub -1 /arm_ik/delta_right geometry_msgs/msg/TwistStamped "{
   twist: {linear: {x: 0.05}, angular: {z: 0.2}}}"
 
 # демо-«шагоход»: каждые 6 с +5 см вперёд
-ros2 run arm_ik demo_delta_publisher --ros-args -p use_sim_time:=true \
+ros2 run arm_ik demo_delta --ros-args -p use_sim_time:=true \
     -p side:=right -p dx:=0.05 -p period:=6.0
 ```
 
-### 4.3 Выходы
+### 5.3 Выходы
 
 | Топик | Тип | Содержимое |
 |---|---|---|
@@ -229,10 +245,10 @@ ros2 run arm_ik demo_delta_publisher --ros-args -p use_sim_time:=true \
 | `/arm_ik/{left,right}/status` | `std_msgs/String` (JSON) | `state: idle|traj|fine|reached|failed`, `err_pos_m`, `err_rot_rad` |
 | `~/solve` | `arm_ik/srv/SolveIK` | решить IK без движения (для планировщика верхнего уровня) |
 
-## 5. Как это работает внутри (по этапам)
+## 6. Как это работает внутри (по этапам)
 
 1. **Постановка цели.** PoseStamped переносится TF2 в `pelvis`; TwistStamped —
-   прибавляется к опорной позе (§4.2). Результат — матрица 4×4 `T_des`.
+   прибавляется к опорной позе (§5.2). Результат — матрица 4×4 `T_des`.
 2. **Клампинг стола.** Если TCP-точка цели лежит в прямоугольнике стола ниже
    `h_table + margin`, она поднимается ровно на поверхность+запас
    (`TableGuard.clamp_target_above_table`).
@@ -260,7 +276,7 @@ ros2 run arm_ik demo_delta_publisher --ros-args -p use_sim_time:=true \
 
 Обе руки — независимые стан-машины в одном узле: общий топик команд, непересекающиеся ID моторов.
 
-## 6. Про сервис `SolveIK`
+## 7. Про сервис `SolveIK`
 
 В чистом `ament_python` rosidl-кодген srv не запускается автоматически. Варианты:
 * не использовать сервис (узел полностью работает от топиков — код защищён
@@ -270,7 +286,7 @@ ros2 run arm_ik demo_delta_publisher --ros-args -p use_sim_time:=true \
   `generate_messages`);
 * временно заменить сервис на пару стандартных message-топиков.
 
-## 7. Параметры узла (кратко)
+## 8. Параметры узла (кратко)
 
 | Параметр | Умолч. | Назначение |
 |---|---|---|
@@ -283,13 +299,13 @@ ros2 run arm_ik demo_delta_publisher --ros-args -p use_sim_time:=true \
 | `enable_table_guard` | true | выключить защиту (например, для задач вне стола) |
 | `waypoint_lift` | 0.25 | запас захода сверху, м |
 | `n_seeds` | 4 | число стартов IK |
-| `delta_reference` | measured | опора delta-целей (§4.2) |
+| `delta_reference` | measured | опора delta-целей (§5.2) |
 | `delta_accumulate` | false | суммирование серии дельт |
 | `delta_max_lin/rot` | 0.15/0.6 | предохранители размера дельты |
 | `tcp_offset` | "" | переопределить "x,y,z" кончика поверх arms.json |
 | `model_path` | "" | arms.json (пусто — из share/config) |
 
-## 8. Быстрый старт
+## 9. Постоянный режим работы
 
 `arm_ik_node` — **постоянная нода-сервер**: запускается один раз и крутится
 бесконечно (`rclpy.spin`, цикл 50 Гц), ожидая цели на топиках; она не завершается
@@ -299,11 +315,11 @@ ros2 run arm_ik demo_delta_publisher --ros-args -p use_sim_time:=true \
 ```bash
 # терминал 1 — симулятор/реальный робот по cheatsheet команды...
 
-# терминал 2 — запустить IK-сервер как постоянную ноду (без демонстрационных целей):
+# терминал 2 — IK-сервер:
 source install/setup.bash
-ros2 launch arm_ik arm_ik.launch.py                 # — рекомендуется через launch
+ros2 launch arm_ik arm_ik.launch.py
 #   или напрямую:
-ros2 run arm_ik arm_ik_node --ros-args -p use_sim_time:=true -p h_table:=0.9
+ros2 run arm_ik arm_ik --ros-args -p use_sim_time:=true -p h_table:=0.9
 #   (в фоне: ... > /tmp/arm_ik.log 2>&1 &)
 
 # теперь цели можно слать когда угодно, сервер их подхватывает:
@@ -316,26 +332,26 @@ ros2 topic pub -1 /arm_ik/delta_right geometry_msgs/msg/TwistStamped \
 ros2 launch arm_ik arm_ik.launch.py demo:=true h_table:=0.9 goal_x:=0.45 goal_z:=1.0
 # вариант Б — delta-«шагоход» (+5 см вперёд каждые 6 с, правая рука):
 ros2 launch arm_ik arm_ik.launch.py demo_delta:=true delta_side:=right delta_x:=0.05
-# терминал 3 — delta-телеоперация правой руки:
-ros2 topic pub -1 /arm_ik/delta_right geometry_msgs/msg/TwistStamped \
-  "{header:{frame_id:pelvis}, twist:{linear:{x:0.05, z:-0.03}}}"
 # мониторинг:
 ros2 topic echo /arm_ik/right/status
 ros2 topic echo /arm_ik/wrist_right_pose
 ```
 
-## 9. Тесты
+## 10. Тесты
 
 ```bash
 cd arm_ik && python3 -m pytest test -q     # 11 тестов, ROS не нужен
 ```
+
+(`pytest.ini` отключает конфликтующий плагин libtmux; если ваш pytest всё же
+падает с «Marks cannot be applied to fixtures» — добавьте `-p no:libtmux`.)
 
 Покрывают: детерминированность FK и пределы из docs; совпадение аналитического
 Якобиана с конечно-разностным; round-trip IK(FK(q)); скорость профиля ≤ 0.8;
 клампинг/детекцию стола; чтение arms.json; арифметику delta-целей и достижимость
 delta-цели через IK.
 
-## 10. Известные ограничения
+## 11. Известные ограничения
 
 * Модель — 7-звенная цепочка без коллизионной геометрии корпуса/второй руки: стол
   аналитический (плоскость), тело не проверяется (при заходе сверху и малых

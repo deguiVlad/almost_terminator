@@ -24,13 +24,15 @@ from setuptools import setup
 
 setup(
     name="arm_ik",
-    version="0.3.0",
+    version="0.4.0",
     packages=["arm_ik", "arm_ik.nodes"],
-    package_data={"arm_ik": ["../config/*.json"]},
+    # файловых конфигов (config/*.json) в пакете больше нет: единственное
+    # дерево звеньев для IK строится из топиков симулятора /tf + /tf_static
+    # (arm_ik/tree_from_tf.py), поэтому package_data/data_files для config
+    # не объявляются.
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/arm_ik"]),
         ("share/arm_ik", ["package.xml", "README.md", "CHANGELOG.md"]),
-        ("share/arm_ik/config", glob.glob("config/*.json")),
         ("share/arm_ik/launch", glob.glob("launch/*.py")),
         # standalone-запуск единственной ноды -> lib/arm_ik/ (script_dir из setup.cfg)
         ("lib/arm_ik", [

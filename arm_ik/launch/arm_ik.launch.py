@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """Запуск ЕДИНСТВЕННОЙ IK-ноды обеих рук (+ опциональные встроенные демо-цели).
 
+Дерево звеньев нода по умолчанию берёт из топиков симулятора /tf + /tf_static,
+время — из /clock (use_sim_time); файлы конфигов не нужны.
+
     ros2 launch arm_ik arm_ik.launch.py
     ros2 launch arm_ik arm_ik.launch.py h_table:=0.95
     ros2 launch arm_ik arm_ik.launch.py demo_goals:=true goal_x:=0.45 goal_z:=1.0
@@ -42,18 +45,11 @@ def _node_exec():
 
 
 def launch_setup(context, *args, **kwargs):
-    pkg = get_package_share_directory("arm_ik")
-    model_path = LaunchConfiguration("model_path").perform(context)
-    if not model_path:
-        cand = os.path.join(pkg, "config", "arms.json")
-        model_path = cand if os.path.exists(cand) else ""
-
     def b(name):
         return LaunchConfiguration(name).perform(context).lower() == "true"
 
     params = {
         "use_sim_time": b("use_sim_time"),
-        "model_path": model_path,
         "rate_hz": float(LaunchConfiguration("rate_hz").perform(context)),
         "spd_limit": float(LaunchConfiguration("spd_limit").perform(context)),
         "h_table": float(LaunchConfiguration("h_table").perform(context)),
@@ -87,7 +83,6 @@ def generate_launch_description():
     d = lambda name, val, desc="": DeclareLaunchArgument(name, default_value=val, description=desc)
     return LaunchDescription([
         d("use_sim_time", "true", "время из /clock (симулятор)"),
-        d("model_path", "", "путь к config/arms.json (пусто — из share пакета)"),
         d("rate_hz", "50", "частота контура и генерации траектории"),
         d("spd_limit", "0.8", "жёсткий лимит скорости моторов рук, рад/с"),
         d("h_table", "0.9", "высота поверхности стола над pelvis, м"),
@@ -96,7 +91,7 @@ def generate_launch_description():
         d("tol_rot", "0.05", "допуск по ориентации, рад"),
         d("kp", "0.6", "усиление P-коррекции недолёта ПД-приводов"),
         d("table_guard", "true", "включить защиту от стола"),
-        d("tcp_offset", "", "смещение TCP от frame запястья x,y,z (пусто — из arms.json)"),
+        d("tcp_offset", "", "смещение TCP от frame запястья x,y,z (пусто — из цепочки /tf)"),
         d("delta_reference", "measured", "опора delta-целей: measured | last_goal"),
         d("delta_accumulate", "false", "суммировать серию delta-смещений"),
         d("demo", "false", "нода сама публикует абсолютные цели (PoseStamped)"),

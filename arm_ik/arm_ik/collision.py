@@ -15,7 +15,7 @@
 MoveIt / `moveit_msgs/srv/CheckCollisionFine`, но для плоского стола
 аналитического теста достаточно и он работает на 50 Гц без нагрузки на CPU.
 """
-import numpy as np
+from arm_ik._math_compat import np
 
 from .kinematics import chain_transforms
 

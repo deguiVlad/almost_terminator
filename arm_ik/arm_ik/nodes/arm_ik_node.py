@@ -47,12 +47,12 @@ import json
 import os
 import math
 
-import numpy as np
+from arm_ik._math_compat import np
 import rclpy
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
-from scipy.spatial.transform import Rotation
+from arm_ik._math_compat import Rotation
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 

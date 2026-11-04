@@ -11,7 +11,7 @@ package_name = "arm_ik"
 # и Python принимал wrapper за сам модуль (circular import).
 setup(
     name=package_name,
-    version="0.2.1",
+    version="0.2.2",
     packages=[package_name, f"{package_name}.nodes"],
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),

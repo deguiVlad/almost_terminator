@@ -23,8 +23,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-import numpy as np
-from scipy.spatial.transform import Rotation
+from arm_ik._math_compat import np
+from arm_ik._math_compat import Rotation
 
 # ---------------------------------------------------------------------------
 # Описание кинематической цепочки

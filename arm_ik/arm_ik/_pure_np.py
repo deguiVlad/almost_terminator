@@ -42,11 +42,19 @@ class _Array(list):
     def __getitem__(self, key):
         if isinstance(key, tuple):
             cur = list.__getitem__(self, key[0])
+            ndim_left = len(key) - 1
             for kk in key[1:]:
-                if isinstance(cur, list):
+                ndim_left -= 1
+                if isinstance(cur, (list, _Array)):
                     cur = self._sub(cur, kk)
                 else:  # скаляр дальше не индексируется
                     return cur
+                # numpy-семантика: A[:, j] -> [row[j], ...]; если после этого
+                # размерность ещё есть — оборачиваем каждую строку в _Array
+                if ndim_left and isinstance(cur, list) \
+                        and cur and isinstance(cur[0], list):
+                    cur = _Array([_Array(r) if isinstance(r, list) else r
+                                  for r in cur])
             return cur
         v = list.__getitem__(self, key)
         return self._wrapv(v)

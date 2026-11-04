@@ -1,40 +1,36 @@
-import glob
-import os
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Минимальный setup.py без side-effect'ов при разборе.
+
+Эта версия намеренно НЕ содержит параметра `entry_points`: setuptools при
+разборе setup.py резолвит все console-script entry points через pkg_resources,
+и в сломанных системных окружениях (например, битый pytz/babel из-за
+некорректного /etc/localtime) это роняет даже `setup.py --help-commands`,
+который вызывает colcon на этапе build. Без entry_points разбор всегда лёгкий;
+исполняемые файлы ставятся через data_files в lib/arm_ik (см. bin/), а ROS-ноды
+запускаются так:
+
+    ros2 run arm_ik run_arm_ik.py            # или ./bin/run_arm_ik.py напрямую
+    ros2 launch arm_ik arm_ik.launch.py
+
+numpy/scipy не объявлены как install_requires — пакет умеет работать на
+чистом Python-fallback (arm_ik/_math_compat.py), поэтому сборка проходит и
+на машинах без pip-пакетов.
+"""
 from setuptools import setup
 
-package_name = "arm_ik"
-
-# Важно: имена исполняемых в bin/ НЕ совпадают с именами модулей в arm_ik/nodes/
-# (run_arm_ik.py vs arm_ik_node.py). Это исключает классическую ошибку
-#   ImportError: cannot import name 'main' from partially initialized module
-# которая возникала, когда wrapper в lib/arm_ik назывался так же, как модуль,
-# и Python принимал wrapper за сам модуль (circular import).
 setup(
-    name=package_name,
-    version="0.2.2",
-    packages=[package_name, f"{package_name}.nodes"],
+    name="arm_ik",
+    version="0.2.3",
+    packages=["arm_ik", "arm_ik.nodes"],
+    package_data={"arm_ik": ["config/*.json"]},
     data_files=[
-        ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
-        (f"share/{package_name}", ["package.xml", "README.md", "CHANGELOG.md"]),
-        (f"share/{package_name}/config", glob.glob("config/*.json")),
-        (f"share/{package_name}/launch", glob.glob("launch/*.py")),
-        # standalone-скрипты + bootstrap едут в libexec одним куском:
-        (os.path.join("lib", package_name),
-         ["bin/_bootstrap.py", "bin/run_arm_ik.py",
-          "bin/run_demo_goal.py", "bin/run_demo_delta.py"]),
+        ("share/ament_index/resource_index/packages", ["resource/arm_ik"]),
+        ("share/arm_ik", ["package.xml", "README.md", "CHANGELOG.md"]),
     ],
-    install_requires=["setuptools", "numpy", "scipy"],
     zip_safe=True,
     maintainer="hackathon team",
     maintainer_email="dev@example.com",
     description="IK обеих рук TienKung 2.0 Pro (7 DOF) c limits и защитой стола",
     license="Apache-2.0",
-    entry_points={
-        "console_scripts": [
-            # ros2 run arm_ik arm_ik / demo_goal / demo_delta — без коллизий имён
-            "arm_ik = arm_ik.nodes.arm_ik_node:main",
-            "demo_goal = arm_ik.nodes.demo_goal_publisher:main",
-            "demo_delta = arm_ik.nodes.demo_delta_publisher:main",
-        ],
-    },
 )

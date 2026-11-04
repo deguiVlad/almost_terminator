@@ -58,7 +58,13 @@ from std_msgs.msg import String
 
 import tf2_ros
 
-from bodyctrl_msgs.msg import CmdSetMotorPosition, SetMotorPosition
+try:  # штатный путь: кастомные сообщения робота (bodyctrl) доступны в окружении
+    from bodyctrl_msgs.msg import CmdSetMotorPosition, SetMotorPosition
+except ImportError:  # graceful degradation: нода стартует и считает IK даже без
+    # bodyctrl_msgs (полезно для офлайн-отладки/CI). Команды моторов при этом
+    # НЕ публикуются — в лог выдаётся явное предупреждение один раз.
+    CmdSetMotorPosition = None
+    SetMotorPosition = None
 
 from arm_ik.kinematics import (fk, fk_tcp, geometric_jacobian, ik_dls,
                                ik_multi_seed, clip_to_limits, load_arm_model,
@@ -192,7 +198,13 @@ class ArmIKNode(Node):
         self.exec = {s: ArmExecutor(m) for s, m in self.models.items()}
 
         # ---------------- ROS интерфейсы ----------------
-        self.cmd_pub = self.create_publisher(CmdSetMotorPosition, "/arm/cmd_pos", 10)
+        self.cmd_pub = None
+        if CmdSetMotorPosition is not None:
+            self.cmd_pub = self.create_publisher(CmdSetMotorPosition, "/arm/cmd_pos", 10)
+        else:
+            self.get_logger().warn(
+                "bodyctrl_msgs недоступен — IK считается, но команды в /arm/cmd_pos "
+                "НЕ публикуются (dry-run). Убедитесь, что окружение робота source'нуто.")
         self.create_subscription(JointState, "/joint_states", self.on_js, 10)
         self.create_subscription(PoseStamped, "/arm_ik/goal_left",
                                  lambda m: self.on_goal("left", m), 10)
@@ -418,7 +430,8 @@ class ArmIKNode(Node):
 
             if ex.traj is not None and ex.idx < len(ex.traj):
                 # фаза траектории: открытая петля по заранее просчитанному профилю
-                self.cmd_pub.publish(self.make_cmd(model, ex.traj[ex.idx]))
+                if self.cmd_pub is not None:
+                    self.cmd_pub.publish(self.make_cmd(model, ex.traj[ex.idx]))
                 ex.idx += 1
             elif ex.state == ArmExecutor.TRAJ:
                 ex.state = ArmExecutor.FINE  # профиль пройден -> дотягивание

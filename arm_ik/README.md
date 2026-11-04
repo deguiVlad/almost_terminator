@@ -44,6 +44,22 @@ colcon build --packages-select arm_ik
 source install/setup.bash
 ```
 
+**Обязательно пересобирать пакет после любой правки в `setup.py`** (например, при
+добавлении исполняемых скриптов) и после добавления новых файлов в `config/` или
+`launch/`. Без пересборки в `install/arm_ik/lib/arm_ik/` не появляется директория
+`libexec`, и `ros2 launch` падает с ошибкой вида:
+
+```
+package 'arm_ik' found at '.../install/arm_ik', but libexec directory
+'.../install/arm_ik/lib/arm_ik' does not exist
+```
+
+Причины этой ошибки:
+1. пакет собран до появления `entry_points`/`data_files` — сделать `colcon build --packages-select arm_ik`;
+2. сборка без symlink и старый `install/` — надёжнее `colcon build --packages-select arm_ik --symlink-install`;
+3. в другом терминале активирован старый оверлей (`source .../install/setup.bash` из другой копии workspace) — перезейтить `source install/setup.bash` в текущем терминале;
+4. проверьте наличие ноды: `ros2 pkg executables arm_ik` — должны быть `arm_ik_node`, `demo_goal_publisher`, `demo_delta_publisher`, `export_kinematics_from_urdf`.
+
 Запуск вместе с симулятором требует того же окружения, что и остальные пакеты
 команды (`docs/cheatsheet.md`): `export ROS_DOMAIN_ID=146`, `use_sim_time=true`.
 

@@ -312,20 +312,50 @@ def arm_from_dict(d):
         tcp_offset=np.array(d.get("tcp_offset", [0.0, 0.0, 0.0]), dtype=float))
 
 
+def _candidate_config_paths():
+    """Где искать arms.json / arms_template.json в установленном пакете."""
+    import os
+    cands = []
+    pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # .../arm_ik (исходники)
+    for base in (pkg_root, os.path.join(pkg_root, "share", "arm_ik")):
+        for name in ("arms.json", "arms_template.json"):
+            cands.append(os.path.join(base, "config", name))
+    try:  # установленный colcon пакет: install/arm_ik/share/arm_ik/config/...
+        from ament_index_python.packages import get_package_share_directory
+        share = get_package_share_directory("arm_ik")
+        for name in ("arms.json", "arms_template.json"):
+            cands.append(os.path.join(share, "config", name))
+    except Exception:
+        pass
+    return cands
+
+
 def load_arm_model(path=None, side="right"):
     """Загружает модель руки из JSON (сгенерирован export_kinematics_from_urdf.py),
-    либо возвращает встроенный шаблон."""
+    либо возвращает встроенный шаблон.
+
+    Порядок поиска при path=None: config/arms.json рядом с исходниками пакета ->
+    share/<pkg>/config (установленный пакет) -> arms_template.json -> встроенный шаблон.
+    """
     import json
     import os
-    if path is None:
-        default = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config", "arms.json")
-        if not os.path.exists(default):
-            return make_default_arm(side)
-        path = default
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    key = "left" if side == "left" else "right"
-    return arm_from_dict(data[key])
+    if path:
+        full_path = os.path.abspath(os.path.expanduser(path))
+        if not os.path.exists(full_path):
+            raise FileNotFoundError(
+                f"model_path не найден: {full_path}. Сначала перегенерируйте конфиг из URDF: "
+                f"python3 scripts/export_kinematics_from_urdf.py --out config/arms.json")
+        with open(full_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        key = "left" if side == "left" else "right"
+        return arm_from_dict(data[key])
+    for cand in _candidate_config_paths():
+        if os.path.exists(cand):
+            with open(cand, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            key = "left" if side == "left" else "right"
+            return arm_from_dict(data[key])
+    return make_default_arm(side)
 
 
 def make_default_arm(side: str) -> ArmModel:

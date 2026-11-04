@@ -14,23 +14,40 @@ from launch_ros.actions import Node
 
 
 def _node_exec(name):
-    """Исполняемый ноды: сначала собранный (lib/arm_ik/*.py), затем исходники пакета.
+    """Исполняемый ноды. Порядок поиска устойчив к битым/старым сборкам.
 
-    Это позволяет запускать launch-файл и без colcon build — из исходного
-    дерева пакетов (fallback на arm_ik/bin/<name>.py рядом с этим файлом).
+    1) свежий standalone-скрипт из ИСХОДНИКОВ этого пакета (bin/run_*.py);
+    2) собранный entry_point console_scripts (`arm_ik`, `demo_goal`, `demo_delta`);
+    3) собранный bin-скрипт в libexec текущего install;
+    4) иначе — имя как есть (launch даст стандартную ошибку).
+    Старые wrapper'ы с циклическим импортом (arm_ik_node.py в libexec от прошлых
+    сборок) намеренно не используются: у них совпадало имя файла и модуля.
     """
+    pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    base = name.replace(".py", "")
+    run_name = {"arm_ik_node": "run_arm_ik", "demo_goal_publisher": "run_demo_goal",
+                "demo_delta_publisher": "run_demo_delta"}.get(base, base)
+    ep_name = {"arm_ik_node": "arm_ik", "demo_goal_publisher": "demo_goal",
+               "demo_delta_publisher": "demo_delta"}.get(base, base)
+
+    # 1) исходники пакета
+    for cand in (run_name, run_name + ".py"):
+        src_bin = os.path.join(pkg_root, "bin", cand)
+        if os.path.exists(src_bin):
+            return src_bin
     try:
-        prefix = get_package_prefix("arm_ik")           # установлен ли пакет
-        libexec = os.path.join(prefix, "lib", "arm_ik", name)
-        if os.path.exists(libexec):
-            return libexec
+        prefix = get_package_prefix("arm_ik")
+        libdir = os.path.join(prefix, "lib", "arm_ik")
+        # 2) entry_point console_scripts
+        if os.path.exists(os.path.join(libdir, ep_name)):
+            return ep_name
+        # 3) собранный bin-скрипт (lib/arm_ik/run_*.py)
+        for cand in (run_name, run_name + ".py"):
+            if os.path.exists(os.path.join(libdir, cand)):
+                return cand
     except Exception:
         pass
-    src_bin = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           "bin", name)
-    if os.path.exists(src_bin):
-        return src_bin
-    return name  # пусть launch даст стандартную ошибку
+    return ep_name
 
 
 def launch_setup(context, *args, **kwargs):

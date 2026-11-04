@@ -44,6 +44,7 @@
 но ID моторов не пересекаются.
 """
 import json
+import os
 import math
 
 import numpy as np
@@ -138,6 +139,22 @@ class ArmIKNode(Node):
         self.declare_parameter("delta_max_rot", 0.6)           # предохранитель, рад
 
         mp = self.get_parameter("model_path").value or None
+        if not mp:
+            # авто-поиск: рядом с пакетом (config/arms.json) и в share/ установках
+            from arm_ik.kinematics import _candidate_config_paths
+            here = os.path.dirname(os.path.abspath(__file__))          # .../arm_ik/nodes
+            pkg_root = os.path.dirname(os.path.dirname(here))           # корень пакета
+            cand = [os.path.join(pkg_root, "config", "arms.json")]
+            try:
+                from ament_index_python.packages import get_package_share_directory
+                cand.append(os.path.join(get_package_share_directory("arm_ik"),
+                                         "config", "arms.json"))
+            except Exception:
+                pass
+            cand += _candidate_config_paths()
+            mp = next((c for c in cand if c and os.path.exists(c)), None)
+            if mp:
+                self.get_logger().info(f"модель IK autoload: {mp}")
         self.base_frame = self.get_parameter("base_frame").value
         self.models = {"left": load_arm_model(mp, "left"),
                        "right": load_arm_model(mp, "right")}

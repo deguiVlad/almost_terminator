@@ -14,6 +14,8 @@ setup(
         (f"share/{package_name}/config", glob.glob("config/*.json")),
         (f"share/{package_name}/launch", glob.glob("launch/*.py")),
         (os.path.join("lib", package_name), glob.glob("scripts/*.py")),
+        # standalone-ноды: ros2 run arm_ik arm_ik_node.py находит их в lib/arm_ik
+        (os.path.join("lib", package_name), [p for p in glob.glob("bin/*.py") if not p.endswith("_test.py")]),
     ],
     install_requires=["setuptools", "numpy", "scipy"],
     zip_safe=True,

@@ -6,11 +6,31 @@
 """
 import os
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_prefix, get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+
+
+def _node_exec(name):
+    """Исполняемый ноды: сначала собранный (lib/arm_ik/*.py), затем исходники пакета.
+
+    Это позволяет запускать launch-файл и без colcon build — из исходного
+    дерева пакетов (fallback на arm_ik/bin/<name>.py рядом с этим файлом).
+    """
+    try:
+        prefix = get_package_prefix("arm_ik")           # установлен ли пакет
+        libexec = os.path.join(prefix, "lib", "arm_ik", name)
+        if os.path.exists(libexec):
+            return libexec
+    except Exception:
+        pass
+    src_bin = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "bin", name)
+    if os.path.exists(src_bin):
+        return src_bin
+    return name  # пусть launch даст стандартную ошибку
 
 
 def launch_setup(context, *args, **kwargs):
@@ -39,12 +59,12 @@ def launch_setup(context, *args, **kwargs):
     }
 
     nodes = [
-        Node(package="arm_ik", executable="arm_ik_node", name="arm_ik_node",
+        Node(package="arm_ik", executable=_node_exec("arm_ik_node.py"), name="arm_ik_node",
              parameters=[params], output="screen"),
     ]
     if LaunchConfiguration("demo").perform(context).lower() == "true":
         nodes.append(Node(
-            package="arm_ik", executable="demo_goal_publisher",
+            package="arm_ik", executable=_node_exec("demo_goal_publisher.py"),
             name="demo_goal_publisher",
             parameters=[{
                 "use_sim_time": params["use_sim_time"],
@@ -54,7 +74,7 @@ def launch_setup(context, *args, **kwargs):
             output="screen"))
     if LaunchConfiguration("demo_delta").perform(context).lower() == "true":
         nodes.append(Node(
-            package="arm_ik", executable="demo_delta_publisher",
+            package="arm_ik", executable=_node_exec("demo_delta_publisher.py"),
             name="demo_delta_publisher",
             parameters=[{
                 "use_sim_time": params["use_sim_time"],

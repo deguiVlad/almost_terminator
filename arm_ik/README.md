@@ -29,6 +29,7 @@ docs (PoseStamped | TwistStamped)            /joint_states
 | `arm_ik/arm_ik_node.py` | ROS 2 узел: топики целей (абсолютные и delta), сервис `~/solve`, цикл исполнения 50 Гц, фазы traj→fine→reached, телеметрия. |
 | `arm_ik/demo_goal_publisher.py` | Демо абсолютных целей (PoseStamped). |
 | `arm_ik/demo_delta_publisher.py` | Демо шестимерных смещений (TwistStamped). |
+| `bin/arm_ik_node.py`, `bin/demo_goal_publisher.py`, `bin/demo_delta_publisher.py` | Standalone-запускалки нод: исполняемые скрипты с shebang и bootstrap'ом `sys.path` — работают **без colcon build** (`./bin/arm_ik_node.py`). Копируются в `lib/arm_ik/` при сборке. |
 | `scripts/export_kinematics_from_urdf.py` | Извлекает точные origin/axis/limits обеих рук из URDF → `config/arms.json`. |
 | `config/arms_template.json` | Шаблон модели (топология tiangong_pro + пределы из docs); заменить файлом из URDF! |
 | `srv/SolveIK.srv` | Сервис «решить IK без движения» (см. §6 про сборку srv). |
@@ -62,6 +63,30 @@ package 'arm_ik' found at '.../install/arm_ik', but libexec directory
 
 Запуск вместе с симулятором требует того же окружения, что и остальные пакеты
 команды (`docs/cheatsheet.md`): `export ROS_DOMAIN_ID=146`, `use_sim_time=true`.
+
+### 2.1 Быстрый запуск без colcon build (если сборка упорно не проходит)
+
+Ноды можно запускать напрямую — скрипты в `bin/` сами добавляют путь к пакету:
+
+```bash
+source /opt/ros/humble/setup.bash          # только ROS, workspace не нужен
+cd <путь>/arm_ik
+./bin/arm_ik_node.py --ros-args -p use_sim_time:=true -p h_table:=0.9 &
+./bin/demo_goal_publisher.py --ros-args -p use_sim_time:=true   # опционально
+```
+
+launch-файл тоже умеет работать из исходников: `_node_exec()` сначала ищет
+исполняемый в собранном `lib/arm_ik/`, а при его отсутствии берёт `bin/*.py`
+рядом с исходным пакетом. Но сам `ros2 launch arm_ik ...` требует, чтобы пакет
+хотя бы раз был собран (ament должен знать `arm_ik`) — для совсем «без сборки»
+запускайте ноды напрямую из `bin/`, как выше.
+
+Полезная диагностика:
+```bash
+ros2 pkg executables arm_ik                 # список установленных нод
+ls install/arm_ik/lib/arm_ik/               # должны лежать *.py из bin/ и scripts/
+python3 -c "from ament_index_python.packages import get_package_prefix; print(get_package_prefix('arm_ik'))"
+```
 
 ## 3. Подготовка модели руки (обязательно перед боем)
 

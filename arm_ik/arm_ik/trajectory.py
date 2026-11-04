@@ -7,7 +7,7 @@
 суставу + синхронизация по самой долгой оси; генерация промежуточных целей
 с частотой publish_rate узла-исполнителя.
 """
-import numpy as np
+from arm_ik._math_compat import np
 
 
 def joint_space_profile(q0, q1, v_max=0.8, a_max=0.4, dt=0.02):

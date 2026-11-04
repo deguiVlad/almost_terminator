@@ -10,11 +10,11 @@
 """
 import math
 
-import numpy as np
+from arm_ik._math_compat import np
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
-from scipy.spatial.transform import Rotation
+from arm_ik._math_compat import Rotation
 
 
 class DemoGoals(Node):

@@ -53,11 +53,24 @@ source install/setup.bash
 параметры из URDF робота:
 
 ```bash
+# путь к URDF можно не указывать — скрипт сам найдёт tiangong_pro_with_hands.urdf
+# (ищет в ~/nssr-polygon, ~/, /nssr_sim, /workspace); либо явно:
 python3 scripts/export_kinematics_from_urdf.py \
-    --urdf /nssr_sim/assets/robots/tiangong_pro/robot.urdf \
+    --urdf ~/nssr-polygon/assets/robots/tiangong_pro/tiangong_pro_with_hands.urdf \
     --out config/arms.json
-# либо возьмите URDF из топика: ros2 topic echo --once /robot_description data
+
+# TCP = кончик кисти: tip_link берётся из URDF автоматически (обход fixed-цепочки
+# от wrist_roll до листа, обычно hand_{l,r}_link); сместить его можно так:
+#   --tcp-offset 0.1,0,0        # или перебить имя звена: --tip-link-left hand_l_link
+
+# если файл недоступен на диске — возьмите модель с живой системы:
+ros2 topic echo --once /robot_description data | sed -n '2,$p' > /tmp/robot.urdf
+python3 scripts/export_kinematics_from_urdf.py --urdf /tmp/robot.urdf --out config/arms.json
 ```
+
+Если имена суставов в URDF отличаются от канонических (`shoulder_pitch_l_joint` и т.д.
+из `docs/INTERFACES.md`), скрипт подберёт их по ключевым словам; при неоднозначности
+он напечатает список всех суставов — допишите реальное имя в `KEYWORDS`/`MOTOR_IDS`.
 
 Узел автоматически подхватит `config/arms.json` (или путь из параметра
 `model_path`; launch ищет его в share-папке пакета).

@@ -4,8 +4,9 @@
 
 Запуск внутри контейнера симулятора (или где есть доступ к файлам проекта):
 
-    # 1) из файла URDF:
-    python3 export_kinematics_from_urdf.py --urdf /nssr_sim/assets/robots/tiangong_pro/robot.urdf \
+    # 1) из файла URDF (в nssr-polygon файл называется так):
+    python3 export_kinematics_from_urdf.py \
+        --urdf ~/nssr-polygon/assets/robots/tiangong_pro/tiangong_pro_with_hands.urdf \
         --out ../config/arms.json
 
     # 2) с живого робота — взять /robot_description (URDF опубликован там же):
@@ -29,6 +30,29 @@ MOTOR_IDS = {  # по docs/INTERFACES.md
 }
 
 
+def find_urdf(explicit):
+    """Если --urdf не задан, ищем файл типовыми путями."""
+    import os, glob
+    if explicit:
+        return explicit
+    candidates = []
+    for root in [os.path.expanduser("~/nssr-polygon"), os.path.expanduser("~"), "/nssr_sim", "/workspace"]:
+        candidates += glob.glob(os.path.join(root, "**/tiangong_pro*_with_hands.urdf"), recursive=True)
+        candidates += glob.glob(os.path.join(root, "**/tiangong_pro*/robot*.urdf"), recursive=True)
+    for c in candidates:
+        if os.path.isfile(c):
+            print(f"URDF найден автоматически: {c}")
+            return c
+    raise SystemExit("Не найден URDF. Укажите --urdf явно, напр.:\n"
+                     "  --urdf ~/nssr-polygon/assets/robots/tiangong_pro/tiangong_pro_with_hands.urdf")
+
+
+def chain_joint_names(root, known_revolute):
+    """Известные revolute-суставы рук + все fixed внутри кисти (для tip_link)."""
+    names = set(known_revolute)
+    return names
+
+
 def parse_origin(el):
     if el is None:
         return [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
@@ -39,20 +63,25 @@ def parse_origin(el):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--urdf", required=True, help="путь к robot.urdf")
+    ap.add_argument("--urdf", default=None,
+                    help="путь к URDF (по умолчанию ищется tiangong_pro_with_hands.urdf)")
     ap.add_argument("--out", default="../config/arms.json")
     ap.add_argument("--base", default="pelvis")
     ap.add_argument("--tcp-offset", default="0.05,0.0,0.0",
                     help="смещение TCP от frame запястья x,y,z (подобрать по кончику пальцев)")
+    ap.add_argument("--tip-link-left", default=None,
+                    help="имя link-а TCP слева (по умолчанию — лист fixed-цепочки от wrist_roll_l)")
+    ap.add_argument("--tip-link-right", default=None)
     args = ap.parse_args()
 
+    args.urdf = find_urdf(args.urdf)
     tree = ET.parse(args.urdf)
     root = tree.getroot()
 
     joints = {}
     for j in root.findall("joint"):
         if j.get("type") == "fixed":
-            continue
+            continue  # фиксированные связи обрабатываются отдельно при поиске tip_link
         axis_el = j.find("axis")
         axis = [float(v) for v in axis_el.get("xyz", "0 0 1").split()] if axis_el is not None else [0, 0, 1]
         lim_el = j.find("limit")
@@ -63,28 +92,70 @@ def main():
             parent=j.find("parent").get("link"), child=j.find("child").get("link"),
             axis=axis, origin_xyz=xyz, origin_rpy=rpy, limits=[lo, up])
 
+    import re as _re
+    KEYWORDS = ["shoulder_pitch", "shoulder_roll", "shoulder_yaw",
+                "elbow_pitch", "elbow_yaw", "wrist_pitch", "wrist_roll"]
+
+    SIDE_WORDS = {"l": ["_l_", "_left_", "l_joint", "left_joint"],
+                  "r": ["_r_", "_right_", "r_joint", "right_joint"]}
+
+    def side_matches(name, tag):
+        n = name.lower()
+        return any(w in n for w in SIDE_WORDS[tag])
+
+    def resolve_name(kw, tag):
+        # 1) точное имя из docs/INTERFACES.md
+        cand = [f"{kw}_{tag}_joint", f"{kw}_{tag}", f"{kw}_{tag}_axis"]
+        for c in cand:
+            if c in joints:
+                return c
+        # 2) все суставы с этим ключевым словом, затем фильтр по метке стороны
+        kws = [n for n in joints if kw in n.lower()]
+        tagged = [n for n in kws if side_matches(n, tag)]
+        if len(tagged) == 1:
+            return tagged[0]
+        if not kws:
+            raise SystemExit(
+                f"В {args.urdf} вообще нет сустава со словом '{kw}'. "
+                f"Список суставов: {sorted(joints)}\n"
+                f"Подправьте KEYWORDS/MOTOR_IDS в скрипте под фактические имена.")
+        raise SystemExit(
+            f"Неоднозначно: '{kw}' для стороны '{tag}' -> кандидаты {kws}, "
+            f"после фильтра стороны {tagged}")
+
     def chain_for(tag):
-        names = [f"shoulder_pitch_{tag}_joint", f"shoulder_roll_{tag}_joint",
-                 f"shoulder_yaw_{tag}_joint", f"elbow_pitch_{tag}_joint",
-                 f"elbow_yaw_{tag}_joint", f"wrist_pitch_{tag}_joint",
-                 f"wrist_roll_{tag}_joint"]
         out = []
-        for n in names:
-            if n not in joints:
-                raise SystemExit(f"В URDF нет сустава {n}. Проверьте имена звеньев в {args.urdf}")
+        for kw in KEYWORDS:
+            n = resolve_name(kw, tag)
             jd = dict(joints[n])
             jd["name"] = n
-            jd["motor_id"] = MOTOR_IDS[n]
+            jd["motor_id"] = MOTOR_IDS.get(f"{kw}_{tag}_joint", 0)
             out.append(jd)
         return out
 
+    def find_tip_link(chain):
+        """Идём от child последнего сустава вниз по fixed-суставам до листа — это кончик кисти."""
+        cur = chain[-1]["child"]
+        fixed_by_parent = {}
+        for j in root.findall("joint"):
+            if j.get("type") == "fixed":
+                fixed_by_parent.setdefault(j.find("parent").get("link"), []).append(j)
+        while True:
+            nxt = fixed_by_parent.get(cur, [])
+            if not nxt:
+                return cur
+            cur = nxt[0].find("child").get("link")
+
     tcp = [float(v) for v in args.tcp_offset.split(",")]
+    left_chain, right_chain = chain_for("l"), chain_for("r")
     data = {
         "base_frame": args.base,
-        "left": {"side": "left", "joints": chain_for("l"),
-                 "tip_link": "wrist_roll_l_link", "tcp_offset": tcp},
-        "right": {"side": "right", "joints": chain_for("r"),
-                  "tip_link": "wrist_roll_r_link", "tcp_offset": tcp},
+        "left": {"side": "left", "joints": left_chain,
+                 "tip_link": args.tip_link_left or find_tip_link(left_chain),
+                 "tcp_offset": tcp},
+        "right": {"side": "right", "joints": right_chain,
+                  "tip_link": args.tip_link_right or find_tip_link(right_chain),
+                  "tcp_offset": tcp},
     }
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)

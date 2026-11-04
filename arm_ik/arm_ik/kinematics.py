@@ -97,18 +97,25 @@ def chain_transforms(model: ArmModel, q):
     return out
 
 
-def fk(model: ArmModel, q):
-    """Прямая кинематика: возвращает (T_base_tip 4x4, позиции всех суставов 7x3 включая базу)."""
+def fk(model: ArmModel, q, tcp=True):
+    """Прямая кинематика: возвращает (T_base_tip 4x4, позиции всех суставов 7x3 включая базу).
+
+    tcp=True (по умолчанию) — поза КОНЧИКА КИСТИ (TCP): кадр последнего звена
+    с учётом model.tcp_offset. Именно эта поза используется в pose_error /
+    IK-целях, поэтому цель и измерение согласованы по определению.
+    tcp=False — чистый кадр link запястья (без смещения TCP).
+    """
     Ts = chain_transforms(model, q)
-    Ttip = Ts[-1] @ _tmat([0, 0, 0], [0, 0, 0])  # система запястья = последнее звено
+    Ttip = Ts[-1]
+    if tcp:
+        Ttip = Ttip @ _tmat(model.tcp_offset, [0, 0, 0])
     pts = [np.array([0.0, 0.0, 0.0])] + [T[:3, 3] for T in Ts]
     return Ttip, np.array(pts)
 
 
 def fk_tcp(model: ArmModel, q):
     """Поза TCP (кончик кисти) в рамке pelvis: (position 3, quaternion wxyz 4)."""
-    Ttip, _ = fk(model, q)
-    Ttcp = Ttip @ _tmat(model.tcp_offset, [0, 0, 0])
+    Ttcp, _ = fk(model, q, tcp=True)
     pos = Ttcp[:3, 3]
     quat = Rotation.from_matrix(Ttcp[:3, :3]).as_quat()  # xyzw
     return pos, np.array([quat[3], quat[0], quat[1], quat[2]])
@@ -188,32 +195,55 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
     q = np.asarray(q_init, dtype=float).copy()
     W = np.eye(len(model.joints)) if weight is None else np.diag(weight)
     hist = []
-    for _ in range(max_iter):
-        T, _ = fk(model, q)
-        e = pose_error(T, T_des44)
-        nrm = np.linalg.norm(e)
-        hist.append(nrm)
-        if nrm < 1e-6 or (np.linalg.norm(e[:3]) < tol_pos and np.linalg.norm(e[3:]) < tol_rot):
-            return clip_to_limits(q, model), True, hist
-        J = geometric_jacobian(model, q)
-        # взвешенный DLS: dq = W J^T (J W J^T + lambda^2 I)^{-1} e
+
+    def _step(cur_q, damp_cur):
+        """Один LM-шаг: возвращает (dq, J, A)."""
+        J = geometric_jacobian(model, cur_q)
         JW = J @ W
-        A = JW @ J.T + (damping ** 2) * np.eye(6)
-        dq = W @ J.T @ np.linalg.solve(A, e)
+        A = JW @ J.T + (damp_cur ** 2) * np.eye(6)
+        dq = W @ J.T @ np.linalg.solve(A, e_vec)
         if barrier is not None:
-            dq = dq + barrier(q)
+            dq = dq + barrier(cur_q)
         if null_gain > 0.0 and q_prefer is not None:
             # нуль-пространственная проекция: не влияет на позу TCP
             Jp_inv = W @ J.T @ np.linalg.inv(A)
             N = np.eye(len(model.joints)) - Jp_inv @ J
-            dq = dq + null_gain * (N @ (np.asarray(q_prefer) - q))
-        q_new = clip_to_limits(q + step_scale * dq, model, margin=1e-4)
-        if np.allclose(q_new, q, atol=1e-12):
-            # упёрся в пределы и дальше не идёт — попробуй уменьшить шаг
-            q_new = clip_to_limits(q + 0.5 * step_scale * dq, model, margin=1e-4)
-            if np.allclose(q_new, q, atol=1e-12):
-                return q, False, hist
-        q = q_new
+            dq = dq + null_gain * (N @ (np.asarray(q_prefer) - cur_q))
+        return dq, J, A
+
+    damp = float(damping)
+    for _ in range(max_iter):
+        T, _ = fk(model, q)
+        e_vec = pose_error(T, T_des44)
+        nrm = np.linalg.norm(e_vec)
+        hist.append(nrm)
+        if nrm < 1e-6 or (np.linalg.norm(e_vec[:3]) < tol_pos and np.linalg.norm(e_vec[3:]) < tol_rot):
+            return clip_to_limits(q, model), True, hist
+        # Levenberg–Marquardt с backtracking: уменьшаем шаг (damping растёт),
+        # пока норма ошибки не начнёт убывать. Фиксированный damping из DLS
+        # застревал в ~2 мм от цели при жёстком допуске tol_pos=1e-3.
+        accepted = False
+        d_try = damp
+        for _bt in range(8):
+            dq, _J, _A = _step(q, d_try)
+            alpha = step_scale
+            for _ls in range(5):
+                q_new = clip_to_limits(q + alpha * dq, model, margin=1e-4)
+                if np.allclose(q_new, q, atol=1e-12):
+                    break
+                Tn, _ = fk(model, q_new)
+                nn = np.linalg.norm(pose_error(Tn, T_des44))
+                if nn < nrm:
+                    q = q_new
+                    damp = max(float(damping) * 0.5, d_try * 0.7)  # успех — ослабляем демпфер
+                    accepted = True
+                    break
+                alpha *= 0.5
+            if accepted:
+                break
+            d_try = min(d_try * 2.0, 0.9)
+        if not accepted:
+            return q, False, hist                     # застряли в локальном минимуме
     T, _ = fk(model, q)
     e = pose_error(T, T_des44)
     ok = np.linalg.norm(e[:3]) < tol_pos and np.linalg.norm(e[3:]) < tol_rot
@@ -241,9 +271,30 @@ def ik_multi_seed(model: ArmModel, T_des44, seeds, n_seeds=None, jitter=None, **
                 s[i] = min(max(s[i] + rng.uniform(-amp, amp),
                                float(model.lower[i])), float(model.upper[i]))
             seeds.append(s)
+    # страховка от локальных минимумов DLS: если ни один сид не сошёлся,
+    # запускаем дополнительные попытки с более сильным демпфированием —
+    # оно медленнее сходится, но устойчивее к переменной амплитуде шага
+    # (типичный случай: малая дельта-цель рядом с текущей позой).
+    fallback_damps = kw.pop("fallback_damps", (0.10, 0.15))
+    attempts = [(s, dict(kw)) for s in seeds]
+    solved_any = False
+    for s, k in list(attempts):
+        q, ok, _h = ik_dls(model, T_des44, s, **k)
+        if ok:
+            solved_any = True
+            break
+    if not solved_any:
+        # ни один сид не сошёлся — дополнительные попытки с более сильным
+        # демпфированием (устойчивее к локальным минимумам малых дельт)
+        for damp in fallback_damps:
+            for s in seeds[: max(1, len(seeds) // 2)]:
+                k2 = dict(kw)
+                k2["damping"] = damp
+                k2["max_iter"] = max(int(kw.get("max_iter", 120)), 300)
+                attempts.append((s, k2))
     best, best_key = None, None
-    for s in seeds:
-        q, ok, hist = ik_dls(model, T_des44, s, **kw)
+    for s, k in attempts:
+        q, ok, hist = ik_dls(model, T_des44, s, **k)
         T, _ = fk(model, q)
         e = pose_error(T, T_des44)
         key = (not ok, float(np.linalg.norm(e[:3])) * 10 + float(np.linalg.norm(e[3:])),

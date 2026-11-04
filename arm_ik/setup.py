@@ -24,7 +24,7 @@ from setuptools import setup
 
 setup(
     name="arm_ik",
-    version="0.2.3",
+    version="0.3.0",
     packages=["arm_ik", "arm_ik.nodes"],
     package_data={"arm_ik": ["../config/*.json"]},
     data_files=[
@@ -32,10 +32,10 @@ setup(
         ("share/arm_ik", ["package.xml", "README.md", "CHANGELOG.md"]),
         ("share/arm_ik/config", glob.glob("config/*.json")),
         ("share/arm_ik/launch", glob.glob("launch/*.py")),
-        # standalone-запускалки нод -> lib/arm_ik/ (script_dir из setup.cfg)
+        # standalone-запуск единственной ноды -> lib/arm_ik/ (script_dir из setup.cfg)
         ("lib/arm_ik", [
             "bin/_bootstrap.py", "bin/run_arm_ik.py",
-            "bin/run_demo_goal.py", "bin/run_demo_delta.py"]),
+            "arm_ik/nodes/arm_ik_node.py"]),
     ],
     zip_safe=True,
     maintainer="hackathon team",

@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Запуск IK-сервера обеих рук + (опционально) демо-целей.
+"""Запуск ЕДИНСТВЕННОЙ IK-ноды обеих рук (+ опциональные встроенные демо-цели).
 
     ros2 launch arm_ik arm_ik.launch.py
-    ros2 launch arm_ik arm_ik.launch.py demo:=true h_table:=0.95 goal_x:=0.45
+    ros2 launch arm_ik arm_ik.launch.py h_table:=0.95
+    ros2 launch arm_ik arm_ik.launch.py demo_goals:=true goal_x:=0.45 goal_z:=1.0
+    ros2 launch arm_ik arm_ik.launch.py demo_delta:=true delta_side:=right delta_x:=0.05
+
+Отдельных демо-нод больше нет: цели публикует сама нода при demo_goals/demo_delta.
 """
 import os
 
@@ -13,41 +17,28 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
-def _node_exec(name):
-    """Исполняемый ноды. Порядок поиска устойчив к битым/старым сборкам.
+def _node_exec():
+    """Исполняемый единственной ноды. Порядок поиска устойчив к битым сборкам.
 
-    1) свежий standalone-скрипт из ИСХОДНИКОВ этого пакета (bin/run_*.py);
-    2) собранный entry_point console_scripts (`arm_ik`, `demo_goal`, `demo_delta`);
-    3) собранный bin-скрипт в libexec текущего install;
-    4) иначе — имя как есть (launch даст стандартную ошибку).
+    1) standalone-скрипт из ИСХОДНИКОВ этого пакета (bin/run_arm_ik.py);
+    2) собранный скрипт в libexec текущего install (run_arm_ik.py);
+    3) иначе — имя как есть (launch даст стандартную ошибку с подсказкой).
     Старые wrapper'ы с циклическим импортом (arm_ik_node.py в libexec от прошлых
     сборок) намеренно не используются: у них совпадало имя файла и модуля.
     """
     pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    base = name.replace(".py", "")
-    run_name = {"arm_ik_node": "run_arm_ik", "demo_goal_publisher": "run_demo_goal",
-                "demo_delta_publisher": "run_demo_delta"}.get(base, base)
-    ep_name = {"arm_ik_node": "arm_ik", "demo_goal_publisher": "demo_goal",
-               "demo_delta_publisher": "demo_delta"}.get(base, base)
-
-    # 1) исходники пакета
-    for cand in (run_name, run_name + ".py"):
+    for cand in ("run_arm_ik.py", "run_arm_ik"):
         src_bin = os.path.join(pkg_root, "bin", cand)
         if os.path.exists(src_bin):
             return src_bin
     try:
-        prefix = get_package_prefix("arm_ik")
-        libdir = os.path.join(prefix, "lib", "arm_ik")
-        # 2) entry_point console_scripts
-        if os.path.exists(os.path.join(libdir, ep_name)):
-            return ep_name
-        # 3) собранный bin-скрипт (lib/arm_ik/run_*.py)
-        for cand in (run_name, run_name + ".py"):
+        libdir = os.path.join(get_package_prefix("arm_ik"), "lib", "arm_ik")
+        for cand in ("run_arm_ik.py", "run_arm_ik"):
             if os.path.exists(os.path.join(libdir, cand)):
                 return cand
     except Exception:
         pass
-    return ep_name
+    return "run_arm_ik.py"
 
 
 def launch_setup(context, *args, **kwargs):
@@ -57,8 +48,11 @@ def launch_setup(context, *args, **kwargs):
         cand = os.path.join(pkg, "config", "arms.json")
         model_path = cand if os.path.exists(cand) else ""
 
+    def b(name):
+        return LaunchConfiguration(name).perform(context).lower() == "true"
+
     params = {
-        "use_sim_time": LaunchConfiguration("use_sim_time").perform(context).lower() == "true",
+        "use_sim_time": b("use_sim_time"),
         "model_path": model_path,
         "rate_hz": float(LaunchConfiguration("rate_hz").perform(context)),
         "spd_limit": float(LaunchConfiguration("spd_limit").perform(context)),
@@ -69,39 +63,24 @@ def launch_setup(context, *args, **kwargs):
         "kp": float(LaunchConfiguration("kp").perform(context)),
         "tcp_offset": LaunchConfiguration("tcp_offset").perform(context),
         "delta_reference": LaunchConfiguration("delta_reference").perform(context),
-        "delta_accumulate":
-            LaunchConfiguration("delta_accumulate").perform(context).lower() == "true",
-        "enable_table_guard":
-            LaunchConfiguration("table_guard").perform(context).lower() == "true",
+        "delta_accumulate": b("delta_accumulate"),
+        "enable_table_guard": b("table_guard"),
+        # встроенные демо-паблишеры (внутри той же ноды)
+        "demo_goals": b("demo"),
+        "demo_delta": b("demo_delta"),
+        "demo_side": LaunchConfiguration("delta_side").perform(context),
+        "demo_x": float(LaunchConfiguration("goal_x").perform(context)),
+        "demo_y_l": float(LaunchConfiguration("goal_y_left").perform(context)),
+        "demo_y_r": float(LaunchConfiguration("goal_y_right").perform(context)),
+        "demo_z": float(LaunchConfiguration("goal_z").perform(context)),
+        "demo_yaw_deg": float(LaunchConfiguration("goal_yaw_deg").perform(context)),
+        "demo_dx": float(LaunchConfiguration("delta_x").perform(context)),
+        "demo_dz": float(LaunchConfiguration("delta_z").perform(context)),
+        "demo_period": float(LaunchConfiguration("demo_period").perform(context)),
     }
 
-    nodes = [
-        Node(package="arm_ik", executable=_node_exec("arm_ik_node.py"), name="arm_ik_node",
-             parameters=[params], output="screen"),
-    ]
-    if LaunchConfiguration("demo").perform(context).lower() == "true":
-        nodes.append(Node(
-            package="arm_ik", executable=_node_exec("demo_goal_publisher.py"),
-            name="demo_goal_publisher",
-            parameters=[{
-                "use_sim_time": params["use_sim_time"],
-                "x": float(LaunchConfiguration("goal_x").perform(context)),
-                "z": float(LaunchConfiguration("goal_z").perform(context)),
-            }],
-            output="screen"))
-    if LaunchConfiguration("demo_delta").perform(context).lower() == "true":
-        nodes.append(Node(
-            package="arm_ik", executable=_node_exec("demo_delta_publisher.py"),
-            name="demo_delta_publisher",
-            parameters=[{
-                "use_sim_time": params["use_sim_time"],
-                "side": LaunchConfiguration("delta_side").perform(context),
-                "dx": float(LaunchConfiguration("delta_x").perform(context)),
-                "dz": float(LaunchConfiguration("delta_z").perform(context)),
-                "period": float(LaunchConfiguration("delta_period").perform(context)),
-            }],
-            output="screen"))
-    return nodes
+    return [Node(package="arm_ik", executable=_node_exec(), name="arm_ik_node",
+                 parameters=[params], output="screen")]
 
 
 def generate_launch_description():
@@ -117,16 +96,19 @@ def generate_launch_description():
         d("tol_rot", "0.05", "допуск по ориентации, рад"),
         d("kp", "0.6", "усиление P-коррекции недолёта ПД-приводов"),
         d("table_guard", "true", "включить защиту от стола"),
-        d("tcp_offset", "", "смещение TCP от frame запястья x,y,z (если пусто — из arms.json)"),
+        d("tcp_offset", "", "смещение TCP от frame запястья x,y,z (пусто — из arms.json)"),
         d("delta_reference", "measured", "опора delta-целей: measured | last_goal"),
         d("delta_accumulate", "false", "суммировать серию delta-смещений"),
-        d("demo", "false", "запустить демо-паблишер абсолютных целей"),
+        d("demo", "false", "нода сама публикует абсолютные цели (PoseStamped)"),
         d("goal_x", "0.45", "демо: x цели, м"),
+        d("goal_y_left", "0.25", "демо: y левой руки, м"),
+        d("goal_y_right", "-0.25", "демо: y правой руки, м"),
         d("goal_z", "1.0", "демо: z цели, м"),
-        d("demo_delta", "false", "запустить демо delta-смещений (TwistStamped)"),
-        d("delta_side", "right", "демо delta: left | right | both"),
+        d("goal_yaw_deg", "-90", "демо: кисть смотрит вниз, град"),
+        d("demo_delta", "false", "нода сама публикует delta-смещения (TwistStamped)"),
+        d("delta_side", "both", "демо delta: left | right | both"),
         d("delta_x", "0.05", "демо delta: смещение вперёд, м"),
         d("delta_z", "0.0", "демо delta: смещение вверх, м"),
-        d("delta_period", "6.0", "демо delta: период публикации, с"),
+        d("demo_period", "8.0", "демо: период публикации целей, с"),
         OpaqueFunction(function=launch_setup),
     ])

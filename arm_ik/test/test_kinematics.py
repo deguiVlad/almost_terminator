@@ -9,6 +9,7 @@
 pure-python массивы с numpy-объектами и падали бы на импортах. np здесь —
 это либо настоящий numpy, либо чистый Python fallback (одинаковый API).
 """
+import json
 import math
 import os
 import sys
@@ -51,7 +52,7 @@ def _mini_urdf():
 @pytest.fixture(scope="module")
 def model():
     from arm_ik.kinematics import load_arm_model
-    return load_arm_model("right")  # конфиг шаблона из config/arms_template.json
+    return load_arm_model(side="right")  # конфиг шаблона из config/arms_template.json
 
 
 def _close(a, b, atol=1e-9):
@@ -62,7 +63,7 @@ def _close(a, b, atol=1e-9):
 
 # ---------------------------------------------------------------- базовая FK
 def test_fk_rotation_axis_consistency(model):
-    from arm_ik.kinematics import fk, chain_transforms
+    from arm_ik.kinematics import fk
     q = np.array([0.0] * 7)
     T0, _ = fk(model, q)
     q2 = np.array([0.0] * 7)
@@ -76,7 +77,7 @@ def test_fk_rotation_axis_consistency(model):
 
 
 def test_jacobian_matches_finite_diff(model):
-    from arm_ik.kinematics import fk_tcp, geometric_jacobian
+    from arm_ik.kinematics import fk, geometric_jacobian
     q = np.array([0.2, -0.4, 0.3, -1.1, 0.5, 0.3, -0.2])
     J = geometric_jacobian(model, q)
     eps = 1e-6
@@ -122,7 +123,7 @@ def test_ik_roundtrip_random_poses(model):
         q_tgt = np.array([rnd.uniform(l, u) for l, u in zip(lo, up)])
         T_des, _ = fk(model, q_tgt)
         q0 = np.array([(l + u) / 2 for l, u in zip(lo, up)])
-        q_sol, ok = ik_dls(model, T_des, q0)
+        q_sol, ok, _hist = ik_dls(model, T_des, q0, max_iter=300, damping=0.02)
         if ok:
             T_sol, _ = fk(model, q_sol)
             e = [abs(float(v)) for v in (T_sol[:3, 3] - T_des[:3, 3])]
@@ -162,12 +163,29 @@ def test_table_guard_blocks_and_clamps(model):
 
 
 def test_load_from_json_template(tmp_path):
-    from arm_ik.kinematics import load_arm_config
-    cfg = {"left": {"joints": [], "base_frame": "pelvis"}}
+    from arm_ik.kinematics import load_arm_model
     p = tmp_path / "arms.json"
-    p.write_text('{"left": {"base_frame": "pelvis", "tip_link": "x", "joints": []}}')
-    m = load_arm_config(str(p))
-    assert "left" in m
+    p.write_text(json.dumps({
+        "base_frame": "pelvis",
+        "left": {"side": "left", "tip_link": "wrist_roll_l_link", "tcp_offset": [0.05, 0, 0],
+                 "joints": []},
+    }))
+    # пустая цепочка недопустима для ArmModel — проверим хотя бы парсинг через полный шаблон:
+    import copy
+    from arm_ik.kinematics import make_default_arm
+    m = make_default_arm("left")
+    data = {"base_frame": "pelvis",
+            "left": {"side": "left", "tip_link": m.tip_link,
+                     "tcp_offset": [float(v) for v in m.tcp_offset],
+                     "joints": [{"name": j.name, "motor_id": j.motor_id,
+                                 "axis": [float(v) for v in j.axis],
+                                 "origin_xyz": [float(v) for v in j.origin_xyz],
+                                 "origin_rpy": [float(v) for v in j.origin_rpy],
+                                 "limits": [float(j.lower), float(j.upper)]}
+                                for j in m.joints]}}
+    p.write_text(json.dumps(data))
+    mm = load_arm_model(str(p), "left")
+    assert len(mm.joints) == 7 and mm.side == "left"
 
 
 def test_delta_to_T_position_and_rotation():
@@ -190,7 +208,7 @@ def test_delta_goal_reachable_by_ik(model):
     T0, _ = fk(model, q)
     d = np.array([0.03, 0.02, -0.05, 0.05, -0.05, 0.1])
     T1 = delta_to_T(T0, d, base_ref=False)
-    q_sol, ok = ik_multi_seed(model, T1, q, n_seeds=3)
+    q_sol, ok, _ep, _er = ik_multi_seed(model, T1, q, n_seeds=3)
     assert ok
     T2, _ = fk(model, q_sol)
     e = [abs(float(a) - float(b)) for a, b in zip(T2[:3, 3], T1[:3, 3])]
@@ -207,4 +225,4 @@ def test_export_script_parses_urdf(tmp_path):
     cfg = ex.build_config(str(f))
     assert "left" in cfg and len(cfg["left"]["joints"]) == 7
     j0 = cfg["left"]["joints"][0]
-    assert abs(j0["lower"] + 2.97) < 1e-6 and abs(j0["upper"] - 2.97) < 1e-6
+    assert abs(j0["limits"][0] + 2.97) < 1e-6 and abs(j0["limits"][1] - 2.97) < 1e-6

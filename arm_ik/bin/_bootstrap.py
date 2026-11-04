@@ -87,7 +87,9 @@ def bootstrap(module_name):
         sys.path.insert(0, pkg_root)
 
     check = ["rclpy"]
-    if os.environ.get("ARM_IK_REQUIRE_BODYCTRL", "1") == "1":
+    # bodyctrl_msgs по умолчанию не проверяем: нода умеет работать без него
+    # (печатает предупреждение и использует стандартные JointTrajectory-выходы).
+    if os.environ.get("ARM_IK_REQUIRE_BODYCTRL", "0") == "1":
         check.append("bodyctrl_msgs")
     missing = [m for m in check if _try_import(m) is None]
     if missing:
@@ -105,7 +107,24 @@ def bootstrap(module_name):
         _die_install(missing)
 
     import importlib
-    mod = importlib.import_module(f"arm_ik.nodes.{module_name}")
+    try:
+        mod = importlib.import_module(f"arm_ik.nodes.{module_name}")
+    except ImportError as e:
+        print(
+            "arm_ik: не могу импортировать arm_ik.nodes.%s: %s\n"
+            "  sys.path[0..3] = %s\n"
+            "  артефакт запущен из: %s\n"
+            "  Вероятно, запущена СТАРАЯ сборка пакета (или пакет вообще не\n"
+            "  собран/не source'нут). Лечится так:\n"
+            "    rm -rf <ws>/build/arm_ik <ws>/install/arm_ik\n"
+            "    (удалите также старые копии в других workspace, напр.\n"
+            "     rm -rf /nssr_sim/install/arm_ik /nssr_sim/build/arm_ik)\n"
+            "    cd <ваш_ws> && colcon build --packages-select arm_ik\n"
+            "    source install/setup.bash   # последним!\n"
+            "  либо запускайте напрямую из исходников: ./bin/run_arm_ik.py\n"
+            % (module_name, e, sys.path[:4], os.path.abspath(__file__)),
+            file=sys.stderr)
+        raise
     return getattr(mod, "main")
 
 
@@ -120,7 +139,12 @@ def _try_import(name):
 def _find_pkg_root():
     """Каталог, содержащий пакет arm_ik (рядом с bin/ или lib/arm_ik/...)."""
     here = os.path.dirname(os.path.abspath(__file__))
-    for base in (os.path.dirname(here), os.path.dirname(os.path.dirname(here)), os.getcwd()):
+    bases = [os.path.dirname(here)]                      # bin/../ или lib/arm_ik/../../.. ?
+    b = os.path.dirname(os.path.dirname(here))           # lib/<pkg>/../ -> install prefix
+    bases.append(b)
+    bases.append(os.path.dirname(b))                     # ещё уровнем выше
+    bases.append(os.getcwd())
+    for base in bases:
         if os.path.isdir(os.path.join(base, "arm_ik")) and os.path.isfile(
                 os.path.join(base, "arm_ik", "__init__.py")):
             return base

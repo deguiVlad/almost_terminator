@@ -81,6 +81,19 @@ class TableGuard:
             c += d * d
         return c
 
+    def blocks_T(self, T44):
+        """True, если позиция из 4x4 позы попадает под стол (с запасом)."""
+        p = [float(v) for v in T44[:3, 3]]
+        return self.penetration(np.array(p)) > 0.0
+
+    def clamp_goal(self, T44):
+        """Возвращает копию T44 с z цели, поднятым над столом+запас."""
+        import copy as _copy
+        T = np.array(T44, dtype=float).copy()
+        p = self.clamp_target_above_table([float(v) for v in T[:3, 3]])
+        T[:3, 3] = p
+        return T
+
     def clamp_target_above_table(self, pos):
         """Жёсткая страховка цели: TCP никогда не запрашивается ниже стола+запас."""
         p = np.asarray(pos, dtype=float).copy()

@@ -8,14 +8,16 @@
   * рёбра /tf        — активные (вращательные) соединения; их child-рамки
     сопоставляются с именами суставов из /joint_states по суффиксу стороны
     (_l/_left, _r/_right);
-  * пределы суставов — из /robot_description (URDF-лимиты), затем — из
-    config/arms_template.json (docs/INTERFACES.md), иначе ±pi.
+  * пределы суставов — из топика /robot_description (лимиты, переданные
+    симулятором), затем — встроенные типовые значения (docs/INTERFACES.md),
+    иначе ±pi. Файлы с диска не читаются.
 
 Модуль НЕ импортирует rclpy/tf2_ros на уровне модуля: данные принимаются
 обычными кортежами (см. tf_edges / tf_constants), поэтому тестируется офлайн.
 ROS-нода извлекает кортежи из tf2_ros.Buffer.all_as_listofmessages().
 
-Выход — dict в формате arms.json, который читает arm_ik.kinematics.arm_from_dict.
+Выход — dict внутренней конфигурации руки, который читает
+arm_ik.kinematics.arm_from_dict (файл-конфиг для этого не нужен).
 """
 from __future__ import annotations
 
@@ -312,8 +314,24 @@ def build_side_config(edges, constants, joint_names, base, side,
 # Пределы суставов
 # ---------------------------------------------------------------------------
 
+_DOC_LIMITS = {
+    # (lower, upper) по документации docs/INTERFACES.md, рад — встроенный
+    # запасной источник лимитов (файлы не читаются).
+    "shoulder_pitch": (-2.97, 2.97),
+    "shoulder_roll_L": (-0.26, 2.62),
+    "shoulder_roll_R": (-2.62, 0.26),
+    "shoulder_yaw": (-2.97, 2.97),
+    "elbow_pitch": (-2.62, 0.26),
+    "elbow_yaw": (-2.97, 2.97),
+    "wrist_pitch": (-0.79, 1.05),
+    "wrist_roll_L": (-1.66, 1.31),
+    "wrist_roll_R": (-1.31, 1.66),
+}
+
+
 def limits_from_urdf(urdf_xml):
-    """{joint_name: (lower, upper)} из robot_description (xml.etree, без зависимостей)."""
+    """{joint_name: (lower, upper)} из строки /robot_description (xml.etree,
+    без внешних зависимостей; это топик симулятора, а НЕ файл на диске)."""
     import xml.etree.ElementTree as ET
     out = {}
     if not urdf_xml:
@@ -338,27 +356,17 @@ def limits_from_urdf(urdf_xml):
     return out
 
 
-def load_template_limits():
-    """Запасной источник пределов: config/arms_template.json (docs/INTERFACES.md)."""
-    import json
-    import os
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for cand in (os.path.join(here, "config", "arms.json"),
-                 os.path.join(here, "config", "arms_template.json")):
-        if os.path.exists(cand):
-            try:
-                with open(cand, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                out = {}
-                for sd in ("left", "right"):
-                    for jd in data.get(sd, {}).get("joints", []):
-                        out[jd["name"]] = (float(jd["limits"][0]),
-                                           float(jd["limits"][1]))
-                if out:
-                    return out
-            except Exception:
-                pass
-    return {}
+def fallback_limits():
+    """Встроенные типовые пределы обеих рук (docs/INTERFACES.md); используется,
+    когда /robot_description не публикуется. Файлы-конфиги не читаются."""
+    out = {}
+    for _i, kw in enumerate(KEYWORDS):
+        for tag, side in (("l", "left"), ("r", "right")):
+            key = kw + ("_L" if side == "left" else "_R") \
+                if (kw + "_L") in _DOC_LIMITS else kw
+            lo, up = _DOC_LIMITS.get(key, (-math.pi, math.pi))
+            out[f"{kw}_{tag}_joint"] = (lo, up)
+    return out
 
 
 def apply_limits(cfg, limits):
@@ -399,7 +407,7 @@ def build_models_from_tf(static_msgs, dynamic_msgs, joint_names, base_frame,
         if is_arm_joint(c):
             names.add(c.replace("_link", "_joint")
                       if c.endswith("_link") else c)
-    limits = limits_from_urdf(urdf_xml) or load_template_limits()
+    limits = limits_from_urdf(urdf_xml) or fallback_limits()
 
     out = {}
     for side in ("left", "right"):

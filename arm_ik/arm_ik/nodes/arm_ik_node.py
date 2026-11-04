@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
 """ROS 2 узел обратной кинематики обеих рук TienKung 2.0 Pro (7 DOF на руку).
 
+Дерево звеньев для IK строится из топиков симулятора /tf и /tf_static
+(модуль arm_ik.tree_from_tf); файлы URDF/JSON-конфиги не читаются. Время —
+из /clock (запускается с use_sim_time, проверка источника времени выполняется
+на старте ноды).
+
 Интерфейсы:
   ВХОД (два способа задать позу кисти):
     * /arm_ik/goal_left, /arm_ik/goal_right   (geometry_msgs/PoseStamped)
@@ -44,7 +49,6 @@
 но ID моторов не пересекаются.
 """
 import json
-import os
 import math
 
 from arm_ik._math_compat import np
@@ -122,7 +126,7 @@ class ArmIKNode(Node):
         # use_sim_time объявляется автоматически базовым классом Node (ROS 2 Humble);
         # ручное declare_parameter("use_sim_time", ...) роняло ноду с
         # ParameterAlreadyDeclaredException — не добавлять.
-        self.declare_parameter("model_path", "")       # config/arms.json (из URDF)
+        self.declare_parameter("model_path", "")       # необязательный отладочный JSON (по умолчанию не используется)
         self.declare_parameter("base_frame", "pelvis")
         self.declare_parameter("rate_hz", 50.0)
         self.declare_parameter("spd_limit", 0.8)       # жёсткий лимит документации
@@ -139,9 +143,9 @@ class ArmIKNode(Node):
         self.declare_parameter("enable_table_guard", True)
         self.declare_parameter("waypoint_lift", 0.25)  # заход сверху, м (FOCUS_TRACKING §Шаг2)
         self.declare_parameter("n_seeds", 4)           # альтернативных стартов IK
-        self.declare_parameter("tcp_offset", "")         # "x,y,z" поверх arms.json (переопределить кончик)
-        # --- источник дерева звеньев: /tf + /tf_static симулятора (по умолчанию) ---
-        self.declare_parameter("tree_source", "tf")     # tf | file
+        self.declare_parameter("tcp_offset", "")         # "x,y,z" поверх TF-цепочки (переопределить кончик)
+        # --- источник дерева звеньев для IK ---
+        self.declare_parameter("tree_source", "tf")      # tf | file (file — только отладочный JSON по model_path)
         self.declare_parameter("tf_wait_timeout", 10.0) # с ожидания первого полного дерева TF
         self.declare_parameter("tf_refresh_period", 5.0) # с периодической пересборки цепочки из TF
         # --- параметры delta-целей (TwistStamped на /arm_ik/delta_{left,right}) ---
@@ -165,40 +169,34 @@ class ArmIKNode(Node):
         self.base_frame = self.get_parameter("base_frame").value
         # ---------------- источник дерева звеньев для IK ----------------
         # По умолчанию ("tf") цепочка звеньев строится из топиков симулятора
-        # /tf и /tf_static (см. arm_ik.tree_from_tf); "file" — прежнее
-        # поведение (config/arms.json, сгенерированный из URDF).
+        # /tf и /tf_static (см. arm_ik.tree_from_tf); файлы не читаются.
+        # "file" — отладочный режим: одна стартовая модель берётся по явному
+        # пути model_path (JSON в формате arms_template.json) и TF-пересборка
+        # не выполняется.
         self.tree_source = str(self.get_parameter("tree_source").value).lower()
         self.tf_wait_timeout = float(self.get_parameter("tf_wait_timeout").value)
         self.tf_refresh = float(self.get_parameter("tf_refresh_period").value)
-        self._model_path = None
-        if self.tree_source != "tf":
-            mp = self.get_parameter("model_path").value or None
-            if not mp:
-                # авто-поиск: рядом с пакетом (config/arms.json) и в share/ установках
-                from arm_ik.kinematics import _candidate_config_paths
-                here = os.path.dirname(os.path.abspath(__file__))          # .../arm_ik/nodes
-                pkg_root = os.path.dirname(os.path.dirname(here))           # корень пакета
-                cand = [os.path.join(pkg_root, "config", "arms.json")]
-                try:
-                    from ament_index_python.packages import get_package_share_directory
-                    cand.append(os.path.join(get_package_share_directory("arm_ik"),
-                                             "config", "arms.json"))
-                except Exception:
-                    pass
-                cand += _candidate_config_paths()
-                mp = next((c for c in cand if c and os.path.exists(c)), None)
-                if mp:
-                    self.get_logger().info(f"модель IK autoload: {mp}")
-            self._model_path = mp
-            self.models = {"left": load_arm_model(mp, "left"),
-                           "right": load_arm_model(mp, "right")}
-        else:
-            # TF-режим: стартовые модели — встроенный шаблон (нужны сразу для
-            # FK/телеметрии), затем перезаменяются деревом из /tf+/tf_static,
+        if self.tree_source == "tf":
+            # стартовые модели — встроенная заглушка (нужны сразу для FK/
+            # телеметрии), затем перезаменяются деревом из /tf+/tf_static,
             # как только оно появится в буфере.
             self.models = {"left": load_arm_model(None, "left"),
                            "right": load_arm_model(None, "right")}
             self._tf_models_ready = False
+        else:
+            mp = self.get_parameter("model_path").value or None
+            if not mp:
+                self.get_logger().error(
+                    "tree_source:=file требует явного -p model_path:=<arms.json>; "
+                    "по умолчанию дерево звеньев берётся из /tf + /tf_static "
+                    "(tree_source:=tf) и файл не нужен — переключаюсь на tf")
+                self.tree_source = "tf"
+                self.models = {"left": load_arm_model(None, "left"),
+                               "right": load_arm_model(None, "right")}
+                self._tf_models_ready = False
+            else:
+                self.models = {"left": load_arm_model(mp, "left"),
+                               "right": load_arm_model(mp, "right")}
         for m in self.models.values():
             m.base_frame = self.base_frame
         tof = self.get_parameter("tcp_offset").value
@@ -404,8 +402,9 @@ class ArmIKNode(Node):
                 self._tf_timeout_warned = True
                 self.get_logger().error(
                     f"за {self.tf_wait_timeout:.0f} с дерево из /tf+/tf_static не "
-                    "появилось; для запуска без симулятора используйте "
-                    "-p tree_source:=file -p model_path:=<arms.json>")
+                    "появилось; проверьте robot_state_publisher/симулятор, либо "
+                    "запустите без симулятора: -p tree_source:=file "
+                    "-p model_path:=<arms.json>")
             return False
 
         from arm_ik.tree_from_tf import build_models_from_tf

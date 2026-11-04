@@ -11,10 +11,9 @@
 для каждого сустава — смещение d вдоль Z_prev, длина a вдоль X_prev,
 смещение d_y вдоль Y_prev и угол скрутки alpha вокруг X_prev.
 
-!!! ВНИМАНИЕ: числа ниже — шаблон, собранный по топологии URDF. Перед запуском
-на реальном роботе/симуляторе переснимите их из `assets/robots/tiangong_pro/`
-(или возьмите из `/robot_description` / `/tf_static`) — скрипт
-`scripts/export_kinematics_from_urdf.py` делает это автоматически.
+!!! ВНИМАНИЕ: встроенные числа — только стартовая заглушка. В рантайме точная
+цепочка звеньев строится нодой из топиков симулятора /tf + /tf_static
+(см. arm_ik.tree_from_tf); файлы URDF/JSON для этого не нужны.
 
 Модуль не зависит от ROS: чистый numpy/scipy, легко тестируется офлайн.
 """
@@ -409,30 +408,17 @@ def arm_from_dict(d):
         tcp_offset=np.array(d.get("tcp_offset", [0.0, 0.0, 0.0]), dtype=float))
 
 
-def _candidate_config_paths():
-    """Где искать arms.json / arms_template.json в установленном пакете."""
-    import os
-    cands = []
-    pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # .../arm_ik (исходники)
-    for base in (pkg_root, os.path.join(pkg_root, "share", "arm_ik")):
-        for name in ("arms.json", "arms_template.json"):
-            cands.append(os.path.join(base, "config", name))
-    try:  # установленный colcon пакет: install/arm_ik/share/arm_ik/config/...
-        from ament_index_python.packages import get_package_share_directory
-        share = get_package_share_directory("arm_ik")
-        for name in ("arms.json", "arms_template.json"):
-            cands.append(os.path.join(share, "config", name))
-    except Exception:
-        pass
-    return cands
-
-
 def load_arm_model(path=None, side="right"):
-    """Загружает модель руки из JSON (сгенерирован export_kinematics_from_urdf.py),
-    либо возвращает встроенный шаблон.
+    """Возвращает модель руки.
 
-    Порядок поиска при path=None: config/arms.json рядом с исходниками пакета ->
-    share/<pkg>/config (установленный пакет) -> arms_template.json -> встроенный шаблон.
+    Основной источник дерева звеньев — топики симулятора /tf + /tf_static
+    (см. arm_ik.tree_from_tf); файлы для построения кинематики больше НЕ нужны.
+    Здесь остаются только два вспомогательных пути:
+
+      * path=None — встроенная стартовая модель (make_default_arm): используется
+        как заглушка до получения TF-дерева и в офлайн-тестах;
+      * path=<файл> — явный отладочный JSON в формате arms_template.json
+        (только по явному параметру ноды model_path; автопоиска файлов нет).
     """
     import json
     import os
@@ -440,33 +426,26 @@ def load_arm_model(path=None, side="right"):
         full_path = os.path.abspath(os.path.expanduser(path))
         if not os.path.exists(full_path):
             raise FileNotFoundError(
-                f"model_path не найден: {full_path}. Сначала перегенерируйте конфиг из URDF: "
-                f"python3 scripts/export_kinematics_from_urdf.py --out config/arms.json")
+                f"model_path не найден: {full_path}. По умолчанию дерево звеньев "
+                f"берётся из /tf + /tf_static (tree_source:=tf) и файл не требуется.")
         with open(full_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         key = "left" if side == "left" else "right"
         return arm_from_dict(data[key])
-    for cand in _candidate_config_paths():
-        if os.path.exists(cand):
-            with open(cand, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            key = "left" if side == "left" else "right"
-            return arm_from_dict(data[key])
     return make_default_arm(side)
 
 
 def make_default_arm(side: str) -> ArmModel:
-    """Шаблонная модель руки (кронштейн->плечо->локоть->запястье, DH-подобная форма).
+    """Стартовая (шаблонная) модель руки: кронштейн->плечо->локоть->запястье.
 
     При q=0 кисть смотрит вперёд (+X базы), звенья идут вдоль +Z предыдущей рамки.
-    Оси и длины — типичные для tiangong_pro URDF; ПЕРЕД БОЕМ перегенерировать из
-    фактического URDF: python3 scripts/export_kinematics_from_urdf.py \
-        --urdf <robot.urdf> --out config/arms.json
+    Используется как заглушка до получения дерева из /tf + /tf_static и в
+    офлайн-тестах; в рантайме нода заменяет её точной цепочкой из TF.
     """
     s = 1.0 if side == "left" else -1.0
     tag = "l" if side == "left" else "r"
-    y_sh = 0.20 * s       # боковое смещение плеча от средней линии (м) — из URDF
-    z_sh = 1.28           # высота плеча над pelvis (м) — из URDF
+    y_sh = 0.20 * s       # боковое смещение плеча от средней линии (м)
+    z_sh = 1.28           # высота плеча над pelvis (м)
     a_up = 0.18           # длина плеча до локтя
     a_fore = 0.20         # длина предплечья до запястья
     a_wrist = 0.12        # запястье до TCP кончика пальцев ~

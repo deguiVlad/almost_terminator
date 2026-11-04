@@ -7,7 +7,9 @@
     Обратная кинематика обеих рук TienKung 2.0 Pro (7 DOF на руку):
     DLS-IK с пределами суставов из URDF, траекторный профиль &lt;= 0.8 рад/с,
     замыкание контура по /joint_states, защита от столкновения со столом.
-    Цели PoseStamped на /arm_ik/goal_{left,right}, команды — /arm/cmd_pos.
+    Цели: абсолютная поза PoseStamped на /arm_ik/goal_{left,right} или
+    шестимерное смещение TwistStamped на /arm_ik/delta_{left,right};
+    команды — /arm/cmd_pos.
     Математическое ядро (kinematics/collision/trajectory) не зависит от ROS
     и тестируется офлайн.
   </description>

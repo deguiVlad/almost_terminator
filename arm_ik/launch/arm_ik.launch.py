@@ -31,6 +31,9 @@ def launch_setup(context, *args, **kwargs):
         "tol_rot": float(LaunchConfiguration("tol_rot").perform(context)),
         "kp": float(LaunchConfiguration("kp").perform(context)),
         "tcp_offset": LaunchConfiguration("tcp_offset").perform(context),
+        "delta_reference": LaunchConfiguration("delta_reference").perform(context),
+        "delta_accumulate":
+            LaunchConfiguration("delta_accumulate").perform(context).lower() == "true",
         "enable_table_guard":
             LaunchConfiguration("table_guard").perform(context).lower() == "true",
     }
@@ -47,6 +50,18 @@ def launch_setup(context, *args, **kwargs):
                 "use_sim_time": params["use_sim_time"],
                 "x": float(LaunchConfiguration("goal_x").perform(context)),
                 "z": float(LaunchConfiguration("goal_z").perform(context)),
+            }],
+            output="screen"))
+    if LaunchConfiguration("demo_delta").perform(context).lower() == "true":
+        nodes.append(Node(
+            package="arm_ik", executable="demo_delta_publisher",
+            name="demo_delta_publisher",
+            parameters=[{
+                "use_sim_time": params["use_sim_time"],
+                "side": LaunchConfiguration("delta_side").perform(context),
+                "dx": float(LaunchConfiguration("delta_x").perform(context)),
+                "dz": float(LaunchConfiguration("delta_z").perform(context)),
+                "period": float(LaunchConfiguration("delta_period").perform(context)),
             }],
             output="screen"))
     return nodes
@@ -66,8 +81,15 @@ def generate_launch_description():
         d("kp", "0.6", "усиление P-коррекции недолёта ПД-приводов"),
         d("table_guard", "true", "включить защиту от стола"),
         d("tcp_offset", "", "смещение TCP от frame запястья x,y,z (если пусто — из arms.json)"),
-        d("demo", "false", "запустить демо-паблишер целей"),
+        d("delta_reference", "measured", "опора delta-целей: measured | last_goal"),
+        d("delta_accumulate", "false", "суммировать серию delta-смещений"),
+        d("demo", "false", "запустить демо-паблишер абсолютных целей"),
         d("goal_x", "0.45", "демо: x цели, м"),
         d("goal_z", "1.0", "демо: z цели, м"),
+        d("demo_delta", "false", "запустить демо delta-смещений (TwistStamped)"),
+        d("delta_side", "right", "демо delta: left | right | both"),
+        d("delta_x", "0.05", "демо delta: смещение вперёд, м"),
+        d("delta_z", "0.0", "демо delta: смещение вверх, м"),
+        d("delta_period", "6.0", "демо delta: период публикации, с"),
         OpaqueFunction(function=launch_setup),
     ])

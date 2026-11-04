@@ -2,11 +2,18 @@
 """ROS 2 узел обратной кинематики обеих рук TienKung 2.0 Pro (7 DOF на руку).
 
 Интерфейсы:
-  ВХОД:
+  ВХОД (два способа задать позу кисти):
     * /arm_ik/goal_left, /arm_ik/goal_right   (geometry_msgs/PoseStamped)
-        цель для TCP кисти; рамка header.frame_id может быть любой из дерева TF
+        АБСОЛЮТНАЯ шестимерная поза TCP кисти (позиция + ориентация).
+        Рамка header.frame_id может быть любой из дерева TF
         (pelvis, camera_head_link, ...) — узел сам перенесёт её в pelvis через TF2.
         Рамка pelvis/пустая — без переноса («ориентация относительно корпуса»).
+    * /arm_ik/delta_left, /arm_ik/delta_right (geometry_msgs/TwistStamped)
+        ОТНОСИТЕЛЬНОЕ шестимерное смещение: linear = dxyz (м),
+        angular = ось*угол (рад) — малое вращение в системе base_frame (pelvis).
+        Цель = текущая измеренная поза TCP (FK по /joint_states) + смещение.
+        Опции поведения — параметры delta_reference / delta_accumulate /
+        delta_max_* (подробности в README пакета).
     * ~/solve                                  (arm_ik/srv/SolveIK)
         решить IK без движения (для планирования/отладки верхним уровнем).
         Сервис появляется только если пакет собран с rosidl-генерацией srv
@@ -41,7 +48,7 @@ import math
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, TwistStamped
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 from scipy.spatial.transform import Rotation
@@ -54,7 +61,8 @@ from bodyctrl_msgs.msg import CmdSetMotorPosition, SetMotorPosition
 
 from arm_ik.kinematics import (fk, fk_tcp, geometric_jacobian, ik_dls,
                                ik_multi_seed, clip_to_limits, load_arm_model,
-                               pose_error, _tmat)
+                               pose_error, delta_to_T, pose_to_T as mat_from_posquat,
+                               _tmat)
 from arm_ik.collision import TableGuard
 from arm_ik.trajectory import joint_space_profile
 
@@ -96,6 +104,8 @@ class ArmExecutor:
         self.T_des = np.eye(4)
         self.fine_cycles = 0
         self.last_err = (float("nan"), float("nan"))
+        # опорная поза для delta-целей (используется при delta_reference=last_goal):
+        self.last_T_des = None
 
 
 class ArmIKNode(Node):
@@ -121,6 +131,11 @@ class ArmIKNode(Node):
         self.declare_parameter("waypoint_lift", 0.25)  # заход сверху, м (FOCUS_TRACKING §Шаг2)
         self.declare_parameter("n_seeds", 4)           # альтернативных стартов IK
         self.declare_parameter("tcp_offset", "")         # "x,y,z" поверх arms.json (переопределить кончик)
+        # --- параметры delta-целей (TwistStamped на /arm_ik/delta_{left,right}) ---
+        self.declare_parameter("delta_reference", "measured")  # measured | last_goal
+        self.declare_parameter("delta_accumulate", False)      # суммировать ли дельты между собой
+        self.declare_parameter("delta_max_lin", 0.15)          # предохранитель, м
+        self.declare_parameter("delta_max_rot", 0.6)           # предохранитель, рад
 
         mp = self.get_parameter("model_path").value or None
         self.base_frame = self.get_parameter("base_frame").value
@@ -150,6 +165,10 @@ class ArmIKNode(Node):
         self.fine_max = int(self.get_parameter("fine_max_cycles").value)
         self.lift = float(self.get_parameter("waypoint_lift").value)
         self.n_seeds = int(self.get_parameter("n_seeds").value)
+        self.delta_ref = str(self.get_parameter("delta_reference").value)
+        self.delta_accum = bool(self.get_parameter("delta_accumulate").value)
+        self.delta_max_lin = float(self.get_parameter("delta_max_lin").value)
+        self.delta_max_rot = float(self.get_parameter("delta_max_rot").value)
 
         # ---------------- состояние ----------------
         self.joints = {}
@@ -162,6 +181,11 @@ class ArmIKNode(Node):
                                  lambda m: self.on_goal("left", m), 10)
         self.create_subscription(PoseStamped, "/arm_ik/goal_right",
                                  lambda m: self.on_goal("right", m), 10)
+        # delta-цели: шестимерное смещение TCP (TwistStamped: linear=dxyz, angular=rotvec)
+        self.create_subscription(TwistStamped, "/arm_ik/delta_left",
+                                 lambda m: self.on_delta("left", m), 10)
+        self.create_subscription(TwistStamped, "/arm_ik/delta_right",
+                                 lambda m: self.on_delta("right", m), 10)
         self.pose_pubs = {
             "left": self.create_publisher(PoseStamped, "/arm_ik/wrist_left_pose", 10),
             "right": self.create_publisher(PoseStamped, "/arm_ik/wrist_right_pose", 10)}
@@ -229,14 +253,10 @@ class ArmIKNode(Node):
         return seeds[: max(1, self.n_seeds)]
 
     # ------------------------------------------------------------ goals
-    def on_goal(self, side, goal: PoseStamped):
+    def set_goal(self, side, T_des):
+        """Общий конвейер: IK -> траектория (с защитой стола) -> исполнение."""
         ex = self.exec[side]
         model = self.models[side]
-        try:
-            T_des = self.to_base_T(goal)
-        except Exception as e:  # TF ещё не доступен
-            self.get_logger().error(f"[{side}] TF {self.base_frame}<-{goal.header.frame_id}: {e}")
-            return
         if self.guard is not None:
             T_des[:3, 3] = self.guard.clamp_target_above_table(T_des[:3, 3])
         ex.T_des = T_des
@@ -262,9 +282,10 @@ class ArmIKNode(Node):
         if ok and not bad:
             ex.traj = joint_space_profile(q_now, q_sol, self.spd, self.a_max, dt)
             ex.idx, ex.state, ex.fine_cycles = 0, ArmExecutor.TRAJ, 0
+            ex.last_T_des = T_des.copy()
             self.get_logger().info(
                 f"[{side}] IK решена: {len(ex.traj)} точек (~{(len(ex.traj)-1)/self.rate_hz:.1f} c)")
-            return
+            return True
 
         # 2) план Б: заход через waypoint строго над столом (две IK-фазы)
         if self.guard is not None:
@@ -279,14 +300,77 @@ class ArmIKNode(Node):
                 t2 = joint_space_profile(q_wp, q_fin, self.spd, self.a_max, dt)
                 ex.traj = np.vstack([t1[:-1], t2])
                 ex.idx, ex.state, ex.fine_cycles = 0, ArmExecutor.TRAJ, 0
+                ex.last_T_des = T_des.copy()
                 self.get_logger().info(
                     f"[{side}] IK через waypoint над столом ({len(ex.traj)} точек)")
-                return
+                return True
 
         ex.state, ex.traj = ArmExecutor.FAILED, None
         ex.last_err = (epos, erot)
         self.get_logger().error(
             f"[{side}] IK не сошлась (err pos={epos*100:.1f} см rot={erot:.2f} рад) — удержание")
+        return False
+
+    def on_goal(self, side, goal: PoseStamped):
+        """Абсолютная шестимерная цель TCP (PoseStamped)."""
+        try:
+            T_des = self.to_base_T(goal)
+        except Exception as e:  # TF ещё не доступен
+            self.get_logger().error(f"[{side}] TF {self.base_frame}<-{goal.header.frame_id}: {e}")
+            return
+        self.set_goal(side, T_des)
+
+    def tcp_pose_T(self, side):
+        """Текущая измеренная поза TCP в base_frame (4x4) по /joint_states."""
+        model = self.models[side]
+        pos, quat_wxyz = fk_tcp(model, self.q_meas(model))
+        return mat_from_posquat(pos, quat_wxyz)
+
+    def on_delta(self, side, msg: TwistStamped):
+        """Относительная цель: смещение TCP на 6-мерный вектор (TwistStamped).
+
+        linear  = dxyz (м), angular = ось*угол (рад), оба в системе base_frame.
+        Опорная поза (параметр delta_reference):
+          'measured'  — текущая ИЗМЕРЕННАЯ поза TCP (FK от энкодеров);
+                        повторная публикация той же дельты = «ещё раз на столько же»
+                        относительно фактического положения кисти;
+          'last_goal' — последняя поставленная абсолютная цель (идемпотентно).
+        delta_accumulate=true — дельты суммируются от опорной точки первой дельты
+        серии (джойстик-режим: каждая новая команда двигает дальше).
+        """
+        ex = self.exec[side]
+        fid = msg.header.frame_id
+        if fid not in ("", self.base_frame, "base_link"):
+            self.get_logger().warn(
+                f"[{side}] delta в рамке '{fid}' трактуется как {self.base_frame} (перенос не выполняется)")
+        dpos = np.array([msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z])
+        drot = np.array([msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z])
+
+        # опорная поза выбирается ДО валидации и не меняется при отклонении дельты
+        use_last = (self.delta_ref == "last_goal" and ex.last_T_des is not None) or \
+                   (self.delta_accum and ex.last_T_des is not None
+                    and ex.state in (ArmExecutor.TRAJ, ArmExecutor.FINE, ArmExecutor.REACHED))
+        if use_last:
+            T_ref = ex.last_T_des
+        else:
+            T_ref = self.tcp_pose_T(side)
+
+        # предохранители: одна дельта не должна быть гигантской
+        nl, nr = np.linalg.norm(dpos), np.linalg.norm(drot)
+        if nl > self.delta_max_lin or nr > self.delta_max_rot:
+            self.get_logger().warn(
+                f"[{side}] delta слишком большая (|dp|={nl:.3f} м, |dr|={nr:.3f} рад; "
+                f"лимиты {self.delta_max_lin}/{self.delta_max_rot}) — отклонена")
+            return
+        if nl < 1e-9 and nr < 1e-9:
+            return  # нулевая дельта — ничего делать не нужно
+
+        T_des = delta_to_T(T_ref, dpos, drot)
+        self.get_logger().info(
+            f"[{side}] delta-цель: dp=({dpos[0]:+.3f},{dpos[1]:+.3f},{dpos[2]:+.3f}) м, "
+            f"dr=({drot[0]:+.3f},{drot[1]:+.3f},{drot[2]:+.3f}) рад "
+            f"[ref={'last_goal' if use_last else 'measured'}]")
+        self.set_goal(side, T_des)
 
     # ------------------------------------------------------------ service
     def solve_srv(self, req, res):

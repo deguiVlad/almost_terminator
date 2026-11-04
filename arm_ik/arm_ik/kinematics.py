@@ -249,6 +249,34 @@ def solve_pose_xy_zyaw(model: ArmModel, target_pos, yaw_deg=-90.0, roll_deg=0.0,
     return T
 
 
+def pose_to_T(pos, quat_wxyz):
+    """4x4 матрица позы из (позиция 3, кватернион wxyz 4)."""
+    pos = np.asarray(pos, dtype=float)
+    q = np.asarray(quat_wxyz, dtype=float)
+    T = np.eye(4)
+    T[:3, :3] = Rotation.from_quat([q[1], q[2], q[3], q[0]]).as_matrix()
+    T[:3, 3] = pos
+    return T
+
+
+def delta_to_T(T_ref, dpos, drot):
+    """Целевая поза из опорной и 6-мерного смещения (delta goal).
+
+    dpos — смещение позиции в метрах; drot — малое вращение как rotation vector
+    (ось*угол, радианы). Оба задаются в системе base_frame (pelvis), т.е.
+    «относительно корпуса», что согласуется с PoseStamped-целями того же узла.
+
+        T_new.p = T_ref.p + dpos
+        T_new.R = Rot(drot) @ T_ref.R   (вращение «в мире базы»)
+    """
+    dpos = np.asarray(dpos, dtype=float)
+    drot = np.asarray(drot, dtype=float)
+    T = np.array(T_ref, dtype=float).copy()
+    T[:3, :3] = Rotation.from_rotvec(drot).as_matrix() @ T_ref[:3, :3]
+    T[:3, 3] = T_ref[:3, 3] + dpos
+    return T
+
+
 # ---------------------------------------------------------------------------
 # Встроенные модели рук TienKung 2.0 Pro (Шаблон; обновить из URDF!)
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ setup(
         "console_scripts": [
             "arm_ik_node = arm_ik.arm_ik_node:main",
             "demo_goal_publisher = arm_ik.demo_goal_publisher:main",
+            "demo_delta_publisher = arm_ik.demo_delta_publisher:main",
         ],
     },
 )

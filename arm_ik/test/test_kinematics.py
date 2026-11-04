@@ -14,7 +14,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from arm_ik.kinematics import (fk, fk_tcp, geometric_jacobian, ik_dls,
-                               load_arm_model, pose_error, _tmat)
+                               ik_multi_seed, clip_to_limits, load_arm_model,
+                               pose_error, delta_to_T, solve_pose_xy_zyaw, _tmat)
 from arm_ik.collision import TableGuard
 from arm_ik.trajectory import joint_space_profile
 
@@ -156,3 +157,45 @@ def test_load_from_json_template(tmp_path, model):
     assert np.allclose(m2.lower, model.lower)
     p1, _ = fk_tcp(model, np.zeros(7)); p2, _ = fk_tcp(m2, np.zeros(7))
     assert np.allclose(p1, p2)
+
+
+# ---------------------------------------------------------------------------
+# Delta-цели: шестимерное смещение позы TCP
+# ---------------------------------------------------------------------------
+
+
+def test_delta_to_T_position_and_rotation():
+    T_ref = solve_pose_xy_zyaw(None, [0.4, -0.2, 1.0], yaw_deg=-90.0)
+    # чистое смещение позиции
+    T1 = delta_to_T(T_ref, [0.05, 0.0, -0.02], [0, 0, 0])
+    assert np.allclose(T1[:3, 3], T_ref[:3, 3] + [0.05, 0.0, -0.02])
+    assert np.allclose(T1[:3, :3], T_ref[:3, :3])  # ориентация не тронута
+    # чистое вращение вокруг оси Z базы на 0.3 рад (rotvec = ось*угол)
+    a = 0.3
+    T2 = delta_to_T(T_ref, [0, 0, 0], [0, 0, a])
+    Rz = np.array([[math.cos(a), -math.sin(a), 0], [math.sin(a), math.cos(a), 0], [0, 0, 1]])
+    assert np.allclose(T2[:3, :3], Rz @ T_ref[:3, :3], atol=1e-12)
+    assert np.allclose(T2[:3, 3], T_ref[:3, 3])
+    # нулевая дельта — точная копия
+    T0 = delta_to_T(T_ref, [0, 0, 0], [0, 0, 0])
+    assert np.allclose(T0, T_ref)
+
+
+def test_delta_goal_reachable_by_ik(model):
+    """delta -> целевая поза -> IK -> FK: кисть оказывается в смещённой точке.
+
+    Дельта выбрана вниз по z — вверх от этой шаблонной стартовой позы IK
+    уходит за пределы workspace (плечо почти выпрямлено), что и демонстрирует
+    корректную работу лимитов; для реальных поз из arms.json дельты безопасны.
+    """
+    q_now = np.array([-0.3, 0.3, 0.1, -0.8, 0.0, 0.3, 0.0])
+    q_now = clip_to_limits(q_now, model, margin=0.05)
+    T_meas, _ = fk(model, q_now)
+    T_des = delta_to_T(T_meas, [0.04, -0.02, -0.03], [0.05, 0.1, 0.0])
+    q_sol, ok, epos, erot = ik_multi_seed(model, T_des, [q_now], max_iter=300,
+                                          tol_pos=2e-3, tol_rot=2e-2)
+    assert ok, f"IK от delta-цели не сошлась: pos={epos}, rot={erot}"
+    T_chk, _ = fk(model, q_sol)
+    assert np.linalg.norm(T_chk[:3, 3] - T_des[:3, 3]) < 2e-3
+    # и позиция действительно сместилась примерно на заданный вектор
+    assert np.linalg.norm((T_chk[:3, 3] - T_meas[:3, 3]) - np.array([0.04, -0.02, -0.03])) < 3e-3

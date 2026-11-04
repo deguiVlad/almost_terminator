@@ -44,6 +44,22 @@ colcon build --packages-select arm_ik
 source install/setup.bash
 ```
 
+**Обязательно пересобирать пакет после любой правки в `setup.py`** (например, при
+добавлении исполняемых скриптов) и после добавления новых файлов в `config/` или
+`launch/`. Без пересборки в `install/arm_ik/lib/arm_ik/` не появляется директория
+`libexec`, и `ros2 launch` падает с ошибкой вида:
+
+```
+package 'arm_ik' found at '.../install/arm_ik', but libexec directory
+'.../install/arm_ik/lib/arm_ik' does not exist
+```
+
+Причины этой ошибки:
+1. пакет собран до появления `entry_points`/`data_files` — сделать `colcon build --packages-select arm_ik`;
+2. сборка без symlink и старый `install/` — надёжнее `colcon build --packages-select arm_ik --symlink-install`;
+3. в другом терминале активирован старый оверлей (`source .../install/setup.bash` из другой копии workspace) — перезейтить `source install/setup.bash` в текущем терминале;
+4. проверьте наличие ноды: `ros2 pkg executables arm_ik` — должны быть `arm_ik_node`, `demo_goal_publisher`, `demo_delta_publisher`, `export_kinematics_from_urdf`.
+
 Запуск вместе с симулятором требует того же окружения, что и остальные пакеты
 команды (`docs/cheatsheet.md`): `export ROS_DOMAIN_ID=146`, `use_sim_time=true`.
 
@@ -53,11 +69,24 @@ source install/setup.bash
 параметры из URDF робота:
 
 ```bash
+# путь к URDF можно не указывать — скрипт сам найдёт tiangong_pro_with_hands.urdf
+# (ищет в ~/nssr-polygon, ~/, /nssr_sim, /workspace); либо явно:
 python3 scripts/export_kinematics_from_urdf.py \
-    --urdf /nssr_sim/assets/robots/tiangong_pro/robot.urdf \
+    --urdf ~/nssr-polygon/assets/robots/tiangong_pro/tiangong_pro_with_hands.urdf \
     --out config/arms.json
-# либо возьмите URDF из топика: ros2 topic echo --once /robot_description data
+
+# TCP = кончик кисти: tip_link берётся из URDF автоматически (обход fixed-цепочки
+# от wrist_roll до листа, обычно hand_{l,r}_link); сместить его можно так:
+#   --tcp-offset 0.1,0,0        # или перебить имя звена: --tip-link-left hand_l_link
+
+# если файл недоступен на диске — возьмите модель с живой системы:
+ros2 topic echo --once /robot_description data | sed -n '2,$p' > /tmp/robot.urdf
+python3 scripts/export_kinematics_from_urdf.py --urdf /tmp/robot.urdf --out config/arms.json
 ```
+
+Если имена суставов в URDF отличаются от канонических (`shoulder_pitch_l_joint` и т.д.
+из `docs/INTERFACES.md`), скрипт подберёт их по ключевым словам; при неоднозначности
+он напечатает список всех суставов — допишите реальное имя в `KEYWORDS`/`MOTOR_IDS`.
 
 Узел автоматически подхватит `config/arms.json` (или путь из параметра
 `model_path`; launch ищет его в share-папке пакета).
@@ -194,10 +223,28 @@ ros2 run arm_ik demo_delta_publisher --ros-args -p use_sim_time:=true \
 
 ## 8. Быстрый старт
 
+`arm_ik_node` — **постоянная нода-сервер**: запускается один раз и крутится
+бесконечно (`rclpy.spin`, цикл 50 Гц), ожидая цели на топиках; она не завершается
+после достижения цели и принимает новые цели в любой момент. Останавливается
+только вручную (Ctrl+C) или при падении `/joint_states`.
+
 ```bash
 # терминал 1 — симулятор/реальный робот по cheatsheet команды...
-# терминал 2 (вариант А — абсолютные демо-цели):
+
+# терминал 2 — запустить IK-сервер как постоянную ноду (без демонстрационных целей):
 source install/setup.bash
+ros2 launch arm_ik arm_ik.launch.py                 # — рекомендуется через launch
+#   или напрямую:
+ros2 run arm_ik arm_ik_node --ros-args -p use_sim_time:=true -p h_table:=0.9
+#   (в фоне: ... > /tmp/arm_ik.log 2>&1 &)
+
+# теперь цели можно слать когда угодно, сервер их подхватывает:
+ros2 topic pub -1 /arm_ik/goal_right geometry_msgs/msg/PoseStamped \
+  "{header:{frame_id:pelvis}, pose:{position:{x:0.45,y:-0.2,z:1.0}, orientation:{w:1}}}"
+ros2 topic pub -1 /arm_ik/delta_right geometry_msgs/msg/TwistStamped \
+  "{header:{frame_id:pelvis}, twist:{linear:{x:0.05}}}"
+
+# вариант А — абсолютные демо-цели одним запуском:
 ros2 launch arm_ik arm_ik.launch.py demo:=true h_table:=0.9 goal_x:=0.45 goal_z:=1.0
 # вариант Б — delta-«шагоход» (+5 см вперёд каждые 6 с, правая рука):
 ros2 launch arm_ik arm_ik.launch.py demo_delta:=true delta_side:=right delta_x:=0.05
@@ -212,7 +259,7 @@ ros2 topic echo /arm_ik/wrist_right_pose
 ## 9. Тесты
 
 ```bash
-cd arm_ik && python3 -m pytest test -q     # 10 тестов, ROS не нужен
+cd arm_ik && python3 -m pytest test -q     # 11 тестов, ROS не нужен
 ```
 
 Покрывают: детерминированность FK и пределы из docs; совпадение аналитического

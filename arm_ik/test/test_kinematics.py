@@ -20,6 +20,47 @@ from arm_ik.collision import TableGuard
 from arm_ik.trajectory import joint_space_profile
 
 
+def _mini_urdf():
+    """Генерирует компактный URDF обеих рук (имена как в docs/INTERFACES.md)."""
+    chain = [
+        ("shoulder_pitch", "torso_link", "0.05 0.20 1.28", "0 1 0", -2.97, 2.97),
+        ("shoulder_roll", "shoulder_pitch_l_link", "0 0 0", "1 0 0", None, None),
+        ("shoulder_yaw", "shoulder_roll_l_link", "0 0 -0.05", "0 0 1", -2.97, 2.97),
+        ("elbow_pitch", "shoulder_yaw_l_link", "0.18 0 0", "0 1 0", -2.62, 0.26),
+        ("elbow_yaw", "elbow_pitch_l_link", "0 0 0", "1 0 0", -2.97, 2.97),
+        ("wrist_pitch", "elbow_yaw_l_link", "0.20 0 0", "0 1 0", -0.79, 1.05),
+        ("wrist_roll", "wrist_pitch_l_link", "0 0 0", "1 0 0", None, None),
+    ]
+    out = ['<?xml version="1.0"?>', '<robot name="tiangong_pro">',
+           '  <link name="pelvis"/><link name="torso_link"/>',
+           '  <joint name="waist_joint" type="revolute"><parent link="pelvis"/>'
+           '<child link="torso_link"/><origin xyz="0 0 0.1"/><axis xyz="0 0 1"/>'
+           '<limit lower="-1" upper="1" effort="100" velocity="3"/></joint>']
+    for t in ("l", "r"):
+        prev = "torso_link"
+        for kw, _p, xyz, ax, lo, up in chain:
+            child = f"{kw}_{t}_link"
+            LO = lo if lo is not None else (-0.26 if t == "l" else -2.62)
+            UP = up if up is not None else (2.62 if t == "l" else 0.26)
+            if kw == "wrist_roll":
+                LO, UP = (-1.66, 1.31) if t == "l" else (-1.31, 1.66)
+            out.append(f'  <joint name="{kw}_{t}_joint" type="revolute">'
+
+                       f'<parent link="{prev}"/><child link="{child}"/>'
+                       f'<origin xyz="{xyz}" rpy="0 0 0"/><axis xyz="{ax}"/>'
+                       f'<limit lower="{LO}" upper="{UP}" effort="40" velocity="6"/></joint>')
+            out.append(f'  <link name="{child}"/>')
+            prev = child
+        out.append(f'  <link name="hand_{t}_link"/>')
+        out.append(f'  <joint name="hand_{t}_fixed" type="fixed">'
+
+                   f'<parent link="wrist_roll_{t}_link"/><child link="hand_{t}_link"/>'
+                   f'<origin xyz="0.10 0 0"/></joint>')
+    out.append("</robot>")
+    return "\n".join(out)
+
+
+
 @pytest.fixture()
 def model():
     return load_arm_model(None, "right")
@@ -199,3 +240,30 @@ def test_delta_goal_reachable_by_ik(model):
     assert np.linalg.norm(T_chk[:3, 3] - T_des[:3, 3]) < 2e-3
     # и позиция действительно сместилась примерно на заданный вектор
     assert np.linalg.norm((T_chk[:3, 3] - T_meas[:3, 3]) - np.array([0.04, -0.02, -0.03])) < 3e-3
+
+
+def test_export_script_parses_urdf(tmp_path):
+    """Скрипт экспорта из URDF -> arms.json, который понимает load_arm_model."""
+    import json as _json
+    import subprocess
+    urdf = tmp_path / "robot.urdf"
+    urdf.write_text(_mini_urdf(), encoding="utf-8")
+    out = tmp_path / "arms.json"
+    script = os.path.join(os.path.dirname(__file__), "..", "scripts",
+                          "export_kinematics_from_urdf.py")
+    r = subprocess.run([sys.executable, script, "--urdf", str(urdf),
+                        "--out", str(out), "--tcp-offset", "0.1,0,0"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    data = _json.loads(out.read_text(encoding="utf-8"))
+    # обе руки, по 7 суставов, моторы 11..17 и 21..27, tip найден через fixed-цепочку
+    for side, ids in (("left", range(11, 18)), ("right", range(21, 28))):
+        arm = data[side]
+        assert [j["motor_id"] for j in arm["joints"]] == list(ids)
+        assert arm["tip_link"] == f"hand_{side[0]}_link"
+    # JSON совместим с загрузчиком модели пакета
+    mpath = tmp_path / "arms.json"
+    model = load_arm_model(str(mpath), "right")
+    assert len(model.joints) == 7
+    p, R = fk_tcp(model, np.zeros(7))
+    assert np.isfinite(p).all()

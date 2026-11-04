@@ -1,5 +1,6 @@
+import glob
 import os
-from setuptools import setup  # glob нужен при включении srv: , glob
+from setuptools import setup
 
 package_name = "arm_ik"
 
@@ -10,9 +11,9 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml"]),
-        (f"share/{package_name}/config", ["config/arms_template.json"]),
-        (f"share/{package_name}/launch", ["launch/arm_ik.launch.py"]),
-        (f"share/{package_name}/scripts", ["scripts/export_kinematics_from_urdf.py"]),
+        (f"share/{package_name}/config", glob.glob("config/*.json")),
+        (f"share/{package_name}/launch", glob.glob("launch/*.py")),
+        (os.path.join("lib", package_name), glob.glob("scripts/*.py")),
     ],
     install_requires=["setuptools", "numpy", "scipy"],
     zip_safe=True,
@@ -25,6 +26,7 @@ setup(
             "arm_ik_node = arm_ik.arm_ik_node:main",
             "demo_goal_publisher = arm_ik.demo_goal_publisher:main",
             "demo_delta_publisher = arm_ik.demo_delta_publisher:main",
+            "export_kinematics_from_urdf = scripts.export_kinematics_from_urdf:main",
         ],
     },
 )

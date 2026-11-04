@@ -14,37 +14,40 @@ from launch_ros.actions import Node
 
 
 def _node_exec(name):
-    """Исполняемый ноды: сначала собранный (lib/arm_ik/*), затем исходники пакета.
+    """Исполняемый ноды. Порядок поиска устойчив к битым/старым сборкам.
 
-    Порядок поиска защищает от СТАРЫХ артефактов сборки в чужих workspace
-    (например /nssr_sim/install/arm_ik/lib/arm_ik/arm_ik_node.py с циклическим
-    импортом): приоритет у bin/ этого исходного пакета, затем entry-point
-    console_scripts (`arm_ik` / `demo_*`), и только потом любой собранный .py.
+    1) свежий standalone-скрипт из ИСХОДНИКОВ этого пакета (bin/run_*.py);
+    2) собранный entry_point console_scripts (`arm_ik`, `demo_goal`, `demo_delta`);
+    3) собранный bin-скрипт в libexec текущего install;
+    4) иначе — имя как есть (launch даст стандартную ошибку).
+    Старые wrapper'ы с циклическим импортом (arm_ik_node.py в libexec от прошлых
+    сборок) намеренно не используются: у них совпадало имя файла и модуля.
     """
     pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    # 1) свежий standalone-бинарь из ИСХОДНИКОВ этого пакета
-    for cand_name in (name, name.replace(".py", "")):
-        src_bin = os.path.join(pkg_root, "bin", cand_name)
+    base = name.replace(".py", "")
+    run_name = {"arm_ik_node": "run_arm_ik", "demo_goal_publisher": "run_demo_goal",
+                "demo_delta_publisher": "run_demo_delta"}.get(base, base)
+    ep_name = {"arm_ik_node": "arm_ik", "demo_goal_publisher": "demo_goal",
+               "demo_delta_publisher": "demo_delta"}.get(base, base)
+
+    # 1) исходники пакета
+    for cand in (run_name, run_name + ".py"):
+        src_bin = os.path.join(pkg_root, "bin", cand)
         if os.path.exists(src_bin):
             return src_bin
-    # 2) собранный entry_point (console_scripts) текущего пакета
     try:
         prefix = get_package_prefix("arm_ik")
-        base = name.replace(".py", "")
-        for cand in ("arm_ik" if base == "arm_ik_node" else base, base):
-            libexec = os.path.join(prefix, "lib", "arm_ik", cand)
-            if os.path.exists(libexec) and \
-               os.path.realpath(os.path.dirname(libexec)) != os.path.realpath(prefix):
-                # не берём старые wrapper'ы из чужого install/, если они там есть
-                pass
-            if os.path.exists(libexec):
-                with open(libexec, "rb") as f:
-                    head = f.read(4096)
-                if b"from arm_ik.arm_ik_node import main" not in head:  # старый битый wrapper
-                    return libexec
+        libdir = os.path.join(prefix, "lib", "arm_ik")
+        # 2) entry_point console_scripts
+        if os.path.exists(os.path.join(libdir, ep_name)):
+            return ep_name
+        # 3) собранный bin-скрипт (lib/arm_ik/run_*.py)
+        for cand in (run_name, run_name + ".py"):
+            if os.path.exists(os.path.join(libdir, cand)):
+                return cand
     except Exception:
         pass
-    return name  # пусть launch даст стандартную ошибку
+    return ep_name
 
 
 def launch_setup(context, *args, **kwargs):

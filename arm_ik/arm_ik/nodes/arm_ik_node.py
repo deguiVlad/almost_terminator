@@ -140,6 +140,10 @@ class ArmIKNode(Node):
         self.declare_parameter("waypoint_lift", 0.25)  # заход сверху, м (FOCUS_TRACKING §Шаг2)
         self.declare_parameter("n_seeds", 4)           # альтернативных стартов IK
         self.declare_parameter("tcp_offset", "")         # "x,y,z" поверх arms.json (переопределить кончик)
+        # --- источник дерева звеньев: /tf + /tf_static симулятора (по умолчанию) ---
+        self.declare_parameter("tree_source", "tf")     # tf | file
+        self.declare_parameter("tf_wait_timeout", 10.0) # с ожидания первого полного дерева TF
+        self.declare_parameter("tf_refresh_period", 5.0) # с периодической пересборки цепочки из TF
         # --- параметры delta-целей (TwistStamped на /arm_ik/delta_{left,right}) ---
         self.declare_parameter("delta_reference", "measured")  # measured | last_goal
         self.declare_parameter("delta_accumulate", False)      # суммировать ли дельты между собой
@@ -158,26 +162,43 @@ class ArmIKNode(Node):
         self.declare_parameter("demo_dz", 0.0)        # delta: смещение вверх, м
         self.declare_parameter("demo_period", 8.0)    # с между публикациями
 
-        mp = self.get_parameter("model_path").value or None
-        if not mp:
-            # авто-поиск: рядом с пакетом (config/arms.json) и в share/ установках
-            from arm_ik.kinematics import _candidate_config_paths
-            here = os.path.dirname(os.path.abspath(__file__))          # .../arm_ik/nodes
-            pkg_root = os.path.dirname(os.path.dirname(here))           # корень пакета
-            cand = [os.path.join(pkg_root, "config", "arms.json")]
-            try:
-                from ament_index_python.packages import get_package_share_directory
-                cand.append(os.path.join(get_package_share_directory("arm_ik"),
-                                         "config", "arms.json"))
-            except Exception:
-                pass
-            cand += _candidate_config_paths()
-            mp = next((c for c in cand if c and os.path.exists(c)), None)
-            if mp:
-                self.get_logger().info(f"модель IK autoload: {mp}")
         self.base_frame = self.get_parameter("base_frame").value
-        self.models = {"left": load_arm_model(mp, "left"),
-                       "right": load_arm_model(mp, "right")}
+        # ---------------- источник дерева звеньев для IK ----------------
+        # По умолчанию ("tf") цепочка звеньев строится из топиков симулятора
+        # /tf и /tf_static (см. arm_ik.tree_from_tf); "file" — прежнее
+        # поведение (config/arms.json, сгенерированный из URDF).
+        self.tree_source = str(self.get_parameter("tree_source").value).lower()
+        self.tf_wait_timeout = float(self.get_parameter("tf_wait_timeout").value)
+        self.tf_refresh = float(self.get_parameter("tf_refresh_period").value)
+        self._model_path = None
+        if self.tree_source != "tf":
+            mp = self.get_parameter("model_path").value or None
+            if not mp:
+                # авто-поиск: рядом с пакетом (config/arms.json) и в share/ установках
+                from arm_ik.kinematics import _candidate_config_paths
+                here = os.path.dirname(os.path.abspath(__file__))          # .../arm_ik/nodes
+                pkg_root = os.path.dirname(os.path.dirname(here))           # корень пакета
+                cand = [os.path.join(pkg_root, "config", "arms.json")]
+                try:
+                    from ament_index_python.packages import get_package_share_directory
+                    cand.append(os.path.join(get_package_share_directory("arm_ik"),
+                                             "config", "arms.json"))
+                except Exception:
+                    pass
+                cand += _candidate_config_paths()
+                mp = next((c for c in cand if c and os.path.exists(c)), None)
+                if mp:
+                    self.get_logger().info(f"модель IK autoload: {mp}")
+            self._model_path = mp
+            self.models = {"left": load_arm_model(mp, "left"),
+                           "right": load_arm_model(mp, "right")}
+        else:
+            # TF-режим: стартовые модели — встроенный шаблон (нужны сразу для
+            # FK/телеметрии), затем перезаменяются деревом из /tf+/tf_static,
+            # как только оно появится в буфере.
+            self.models = {"left": load_arm_model(None, "left"),
+                           "right": load_arm_model(None, "right")}
+            self._tf_models_ready = False
         for m in self.models.values():
             m.base_frame = self.base_frame
         tof = self.get_parameter("tcp_offset").value
@@ -209,7 +230,10 @@ class ArmIKNode(Node):
 
         # ---------------- состояние ----------------
         self.joints = {}
+        self._t0 = self.get_clock().now()   # отсчёт для проверки /clock
         self.exec = {s: ArmExecutor(m) for s, m in self.models.items()}
+        self._tf_last_try = None      # когда последний раз просили дерево TF
+        self._urdf_xml = None         # robot_description (для лимитов), если придёт
 
         # ---------------- ROS интерфейсы ----------------
         self.cmd_pub = None
@@ -236,9 +260,24 @@ class ArmIKNode(Node):
             "left": self.create_publisher(String, "/arm_ik/left/status", 10),
             "right": self.create_publisher(String, "/arm_ik/right/status", 10)}
 
-        # TF2: перенос произвольной рамки цели в base_frame
+        # TF2: перенос произвольной рамки цели в base_frame + источник дерева
+        # звеньев для IK (топики симулятора /tf и /tf_static)
         self.tf_buffer = tf2_ros.Buffer()
         tf2_ros.TransformListener(self.tf_buffer, self)
+
+        if self.tree_source == "tf":
+            try:  # лимиты суставов по возможности берём из robot_description
+                from std_msgs.msg import String as _StrMsg
+                self.create_subscription(
+                    _StrMsg, "/robot_description", self.on_robot_desc,
+                    rclpy.qos.QoSProfile(
+                        reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
+                        history=rclpy.qos.HistoryPolicy.KEEP_LAST, depth=1,
+                        durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL))
+            except Exception:
+                pass
+            # первая попытка построить дерево — сразу, далее по таймеру step
+            self.try_build_tree_from_tf()
 
         cbg = ReentrantCallbackGroup()
         if HAVE_SRV:
@@ -267,8 +306,144 @@ class ArmIKNode(Node):
 
         self.get_logger().info(
             f"arm_ik_node ready | tips={[m.tip_link for m in self.models.values()]} | "
+            f"tree={self.tree_source}{' (ждём /tf, /tf_static)' if self.tree_source == 'tf' and not getattr(self, '_tf_models_ready', True) else ''} | "
             f"guard={'ON h=%.2f' % self.guard.h if self.guard else 'OFF'} | "
             f"srv={'on' if HAVE_SRV else 'off (нет сгенерированного arm_ik.srv)'}")
+
+    # ------------------------------------------------------------ дерево из TF
+    def _check_sim_clock(self):
+        """Проверка «время из /clock» при работе с симулятором.
+
+        * если use_sim_time=true — убеждаемся, что в системе есть источник
+          времени симуляции (топик /clock) и нодa реально по нему идёт;
+        * если use_sim_time=false, но /clock публикуется (симуляция запущена),
+          предупреждаем: штампы целей/телеметрии и TF не сойдутся по времени.
+        Проверка выполняется один раз после старта (в первом step()).
+        """
+        if (self.get_clock().now() - self._t0).nanoseconds / 1e9 < 3.0:
+            return                      # даём симулятору время поднять /clock
+        self._clock_checked = True
+        try:
+            names = dict(self.get_topic_names_and_types())
+        except Exception:
+            return
+        has_clock = "/clock" in names
+        sim = bool(self.get_parameter("use_sim_time").value) \
+            if self.has_parameter("use_sim_time") else False
+        if sim:
+            if not has_clock:
+                self.get_logger().warn(
+                    "use_sim_time:=true, но топик /clock НЕ публикуется — "
+                    "часы симуляции недоступны (запустите симулятор/ros2_sim "
+                    "или переключите use_sim_time:=false)")
+            else:
+                self.get_logger().info(
+                    "время берётся из /clock симулятора (use_sim_time=true)")
+        elif has_clock:
+            self.get_logger().warn(
+                "обнаружен /clock (идёт симуляция), но use_sim_time=false — "
+                "штампы /joint_states, /tf и целей будут в разных шкалах; "
+                "рекомендуется ros2 launch ... use_sim_time:=true")
+
+    def on_robot_desc(self, msg):
+        """robot_description (URDF-XML) — источник точных лимитов суставов."""
+        try:
+            self._urdf_xml = str(msg.data)
+        except Exception:
+            pass
+
+    def _tf_snapshot(self):
+        """([static TFMessage], [dynamic TFMessage]) из буфера TF2.
+
+        Берём и static-рёбра (/tf_static — постоянные origin'ы), и динамические
+        (/tf — активные суставные соединения симулятора).
+        """
+        static_msgs, dyn_msgs = [], []
+        try:
+            st, dy = self.tf_buffer.all_as_listofmessages()
+            static_msgs, dyn_msgs = list(st), list(dy)
+        except Exception:
+            try:  # старые версии tf2_ros: только all_frames_as_string/lookup
+                st, dy = self.tf_buffer.all_as_listofmessages() \
+                    if hasattr(self.tf_buffer, "all_as_listofmessages") else ([], [])
+                static_msgs, dyn_msgs = list(st), list(dy)
+            except Exception as e:
+                self.get_logger().debug(f"tf snapshot недоступен: {e}")
+        return static_msgs, dyn_msgs
+
+    def try_build_tree_from_tf(self, force=False):
+        """Пересобрать кинематические модели обеих рук из /tf + /tf_static.
+
+        Вызывается при старте и периодически (tf_refresh_period) из step():
+        пока дерево не получено, нода живёт на шаблонной модели; как только
+        симулятор опубликовал полные /tf+/tf_static — цепочка звеньев
+        пересобирается из TF и executor'ы переключаются на новые модели.
+        """
+        if self.tree_source != "tf":
+            return False
+        now = self.get_clock().now()
+        if not force:
+            last = self._tf_last_try
+            period = (0.0 if not getattr(self, "_tf_models_ready", False)
+                      else self.tf_refresh)
+            if last is not None and (now - last).nanoseconds / 1e9 < period:
+                return False
+        self._tf_last_try = now
+
+        static_msgs, dyn_msgs = self._tf_snapshot()
+        if not static_msgs and not dyn_msgs:
+            waited = (now - self._t0).nanoseconds / 1e9
+            if not getattr(self, "_tf_warned", False):
+                self.get_logger().warn(
+                    "дерево звеньев ещё не получено из /tf, /tf_static — "
+                    "работаю на шаблонной модели (проверьте robot_state_publisher "
+                    "и use_sim_time)")
+                self._tf_warned = True
+            if waited > self.tf_wait_timeout and \
+                    not getattr(self, "_tf_timeout_warned", False):
+                self._tf_timeout_warned = True
+                self.get_logger().error(
+                    f"за {self.tf_wait_timeout:.0f} с дерево из /tf+/tf_static не "
+                    "появилось; для запуска без симулятора используйте "
+                    "-p tree_source:=file -p model_path:=<arms.json>")
+            return False
+
+        from arm_ik.tree_from_tf import build_models_from_tf
+        tcp_ov = None
+        tof = self.get_parameter("tcp_offset").value
+        if tof:
+            v = [float(t) for t in str(tof).split(",")]
+            tcp_ov = {"left": v, "right": v}
+        try:
+            models = build_models_from_tf(
+                static_msgs, dyn_msgs, sorted(self.joints), self.base_frame,
+                urdf_xml=self._urdf_xml, tcp_offsets=tcp_ov,
+                logger=self.get_logger())
+        except Exception as e:
+            self.get_logger().error(f"построение дерева IK из /tf failed: {e}")
+            return False
+        if len(models) < 2:
+            if not getattr(self, "_tf_models_ready", False):
+                self.get_logger().warn(
+                    f"из /tf собраны не обе руки ({sorted(models)}) — жду полное дерево")
+            return False
+        changed = any(models[s].names != self.models[s].names
+                      or models[s].tip_link != self.models[s].tip_link
+                      for s in ("left", "right")) \
+            or not getattr(self, "_tf_models_ready", False)
+        self.models = models
+        for m in self.models.values():
+            m.base_frame = self.base_frame
+        if changed:
+            for s, ex in self.exec.items():
+                ex.model = self.models[s]
+            self._tf_models_ready = True
+            self._tf_warned = False
+            self.get_logger().info(
+                "дерево звеньев IK построено из /tf + /tf_static: " +
+                ", ".join(f"{s}: {m.names[0]}..{m.names[-1]} -> {m.tip_link}"
+                          for s, m in self.models.items()))
+        return True
 
     def _demo_sides(self):
         side = str(self.get_parameter("demo_side").value)
@@ -485,6 +660,12 @@ class ArmIKNode(Node):
     # ------------------------------------------------------------ control loop
     def step(self):
         now = self.get_clock().now().to_msg()
+        if self.tree_source == "tf":
+            # периодическая пересборка дерева звеньев из /tf + /tf_static
+            # (сначала — часто, пока дерево не получено; затем раз в tf_refresh)
+            self.try_build_tree_from_tf()
+        if self.tree_source == "tf" and not getattr(self, "_clock_checked", False):
+            self._check_sim_clock()
         for side, model in self.models.items():
             ex = self.exec[side]
             q_meas = self.q_meas(model)

@@ -207,10 +207,28 @@ ros2 run arm_ik demo_delta_publisher --ros-args -p use_sim_time:=true \
 
 ## 8. Быстрый старт
 
+`arm_ik_node` — **постоянная нода-сервер**: запускается один раз и крутится
+бесконечно (`rclpy.spin`, цикл 50 Гц), ожидая цели на топиках; она не завершается
+после достижения цели и принимает новые цели в любой момент. Останавливается
+только вручную (Ctrl+C) или при падении `/joint_states`.
+
 ```bash
 # терминал 1 — симулятор/реальный робот по cheatsheet команды...
-# терминал 2 (вариант А — абсолютные демо-цели):
+
+# терминал 2 — запустить IK-сервер как постоянную ноду (без демонстрационных целей):
 source install/setup.bash
+ros2 launch arm_ik arm_ik.launch.py                 # — рекомендуется через launch
+#   или напрямую:
+ros2 run arm_ik arm_ik_node --ros-args -p use_sim_time:=true -p h_table:=0.9
+#   (в фоне: ... > /tmp/arm_ik.log 2>&1 &)
+
+# теперь цели можно слать когда угодно, сервер их подхватывает:
+ros2 topic pub -1 /arm_ik/goal_right geometry_msgs/msg/PoseStamped \
+  "{header:{frame_id:pelvis}, pose:{position:{x:0.45,y:-0.2,z:1.0}, orientation:{w:1}}}"
+ros2 topic pub -1 /arm_ik/delta_right geometry_msgs/msg/TwistStamped \
+  "{header:{frame_id:pelvis}, twist:{linear:{x:0.05}}}"
+
+# вариант А — абсолютные демо-цели одним запуском:
 ros2 launch arm_ik arm_ik.launch.py demo:=true h_table:=0.9 goal_x:=0.45 goal_z:=1.0
 # вариант Б — delta-«шагоход» (+5 см вперёд каждые 6 с, правая рука):
 ros2 launch arm_ik arm_ik.launch.py demo_delta:=true delta_side:=right delta_x:=0.05
@@ -225,7 +243,7 @@ ros2 topic echo /arm_ik/wrist_right_pose
 ## 9. Тесты
 
 ```bash
-cd arm_ik && python3 -m pytest test -q     # 10 тестов, ROS не нужен
+cd arm_ik && python3 -m pytest test -q     # 11 тестов, ROS не нужен
 ```
 
 Покрывают: детерминированность FK и пределы из docs; совпадение аналитического

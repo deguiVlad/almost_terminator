@@ -77,18 +77,18 @@ def test_fk_rotation_axis_consistency(model):
 
 
 def test_jacobian_matches_finite_diff(model):
-    from arm_ik.kinematics import fk, geometric_jacobian
+    from arm_ik.kinematics import fk_tcp, geometric_jacobian
+    # Якобиан по умолчанию берётся в TCP (с учётом model.tcp_offset),
+    # поэтому и конечные разности считаем по TCP — как делает IK-петля.
     q = np.array([0.2, -0.4, 0.3, -1.1, 0.5, 0.3, -0.2])
     J = geometric_jacobian(model, q)
     eps = 1e-6
-    T0, _ = fk(model, q)
-    p0 = [float(v) for v in T0[:3, 3]]
+    p0 = np.array([float(v) for v in fk_tcp(model, q)[0]])
     err = 0.0
     for j in range(7):
         qp = [float(v) for v in q]
         qp[j] += eps
-        Tp, _ = fk(model, np.array(qp))
-        pp = [float(v) for v in Tp[:3, 3]]
+        pp = np.array([float(v) for v in fk_tcp(model, np.array(qp))[0]])
         dp = [(a - b) / eps for a, b in zip(pp, p0)]
         for k in range(3):
             err = max(err, abs(dp[k] - float(J[k][j])))
@@ -112,18 +112,26 @@ def test_clip_to_limits_respects_bounds(model):
 
 
 def test_ik_roundtrip_random_poses(model):
-    """Для случайных допустимых q: IK(FK(q)) достигает той же позы TCP."""
-    from arm_ik.kinematics import fk, ik_dls, fk_tcp
+    """Для случайных допустимых q: IK(FK(q)) достигает той же позы TCP.
+
+    Проверяем ровно тот алгоритм, который использует нода — ik_multi_seed
+    (один DLS из единственного старта закономерно попадает в локальные
+    минимумы 7-DOF цепи; сиды-альтернативы это лечат).
+    """
+    from arm_ik.kinematics import fk, ik_multi_seed
     rng_seed = 7
     lo = [max(float(v), -1.2) for v in model.lower]
     up = [min(float(v), 1.2) for v in model.upper]
     n_ok = 0
     rnd = random.Random(rng_seed)
+    mid = np.array([(l + u) / 2 for l, u in zip(lo, up)])
+    seeds = [mid, np.zeros(7),
+             np.array([-0.4, 0.3, 0.0, -0.9, 0.0, 0.2, 0.0]),
+             np.array([-0.8, 0.5, 0.4, -1.6, 0.3, 0.4, 0.0])]
     for trial in range(8):
         q_tgt = np.array([rnd.uniform(l, u) for l, u in zip(lo, up)])
         T_des, _ = fk(model, q_tgt)
-        q0 = np.array([(l + u) / 2 for l, u in zip(lo, up)])
-        q_sol, ok, _hist = ik_dls(model, T_des, q0, max_iter=300, damping=0.02)
+        q_sol, ok, epos, erot = ik_multi_seed(model, T_des, seeds, max_iter=250)
         if ok:
             T_sol, _ = fk(model, q_sol)
             e = [abs(float(v)) for v in (T_sol[:3, 3] - T_des[:3, 3])]

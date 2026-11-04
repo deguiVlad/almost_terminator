@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>arm_ik</name>
-  <version>0.2.1</version>
+  <version>0.3.0</version>
   <description>
     Обратная кинематика обеих рук TienKung 2.0 Pro (7 DOF на руку):
     DLS-IK с пределами суставов из URDF, траекторный профиль &lt;= 0.8 рад/с,

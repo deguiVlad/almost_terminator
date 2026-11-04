@@ -119,7 +119,9 @@ class ArmIKNode(Node):
     def __init__(self):
         super().__init__("arm_ik_node")
         # ---------------- параметры ----------------
-        self.declare_parameter("use_sim_time", True)
+        # use_sim_time объявляется автоматически базовым классом Node (ROS 2 Humble);
+        # ручное declare_parameter("use_sim_time", ...) роняло ноду с
+        # ParameterAlreadyDeclaredException — не добавлять.
         self.declare_parameter("model_path", "")       # config/arms.json (из URDF)
         self.declare_parameter("base_frame", "pelvis")
         self.declare_parameter("rate_hz", 50.0)
@@ -143,6 +145,18 @@ class ArmIKNode(Node):
         self.declare_parameter("delta_accumulate", False)      # суммировать ли дельты между собой
         self.declare_parameter("delta_max_lin", 0.15)          # предохранитель, м
         self.declare_parameter("delta_max_rot", 0.6)           # предохранитель, рад
+        # --- встроенные демо-паблишеры (заменяют отдельные ноды demo_*) ---
+        self.declare_parameter("demo_goals", False)   # публиковать PoseStamped-цели
+        self.declare_parameter("demo_delta", False)   # публиковать TwistStamped-дельты
+        self.declare_parameter("demo_side", "both")   # left | right | both
+        self.declare_parameter("demo_x", 0.45)        # м, вперёд
+        self.declare_parameter("demo_y_l", 0.25)      # левая рука, y
+        self.declare_parameter("demo_y_r", -0.25)     # правая рука, y
+        self.declare_parameter("demo_z", 1.0)         # м, вверх (выше стола)
+        self.declare_parameter("demo_yaw_deg", -90.0) # ориентация «кисть вниз»
+        self.declare_parameter("demo_dx", 0.05)       # delta: смещение вперёд, м
+        self.declare_parameter("demo_dz", 0.0)        # delta: смещение вверх, м
+        self.declare_parameter("demo_period", 8.0)    # с между публикациями
 
         mp = self.get_parameter("model_path").value or None
         if not mp:
@@ -230,10 +244,63 @@ class ArmIKNode(Node):
         if HAVE_SRV:
             self.create_service(SolveIK, "~/solve", self.solve_srv, callback_group=cbg)
         self.timer = self.create_timer(1.0 / self.rate_hz, self.step)
+
+        # ---------------- встроенные демо-паблишеры ----------------
+        # Заменяют отдельные ноды demo_goal_publisher / demo_delta_publisher:
+        # одна нода умеет и исполнять цели, и (опционально) сама их публиковать
+        # для ручной проверки. Включаются параметрами demo_goals / demo_delta.
+        self.demo_goal_pubs = None
+        self.demo_delta_pubs = None
+        if self.get_parameter("demo_goals").value:
+            self.demo_goal_pubs = {
+                s: self.create_publisher(PoseStamped, f"/arm_ik/goal_{s}", 10)
+                for s in self._demo_sides()}
+            self.get_logger().info("demo_goals ON -> публикация PoseStamped целей")
+        if self.get_parameter("demo_delta").value:
+            self.demo_delta_pubs = {
+                s: self.create_publisher(TwistStamped, f"/arm_ik/delta_{s}", 10)
+                for s in self._demo_sides()}
+            self.get_logger().info("demo_delta ON -> публикация TwistStamped смещений")
+        if self.demo_goal_pubs or self.demo_delta_pubs:
+            self.demo_timer = self.create_timer(
+                float(self.get_parameter("demo_period").value), self.demo_tick)
+
         self.get_logger().info(
             f"arm_ik_node ready | tips={[m.tip_link for m in self.models.values()]} | "
             f"guard={'ON h=%.2f' % self.guard.h if self.guard else 'OFF'} | "
             f"srv={'on' if HAVE_SRV else 'off (нет сгенерированного arm_ik.srv)'}")
+
+    def _demo_sides(self):
+        side = str(self.get_parameter("demo_side").value)
+        return ["left", "right"] if side == "both" else [side]
+
+    def demo_tick(self):
+        """Периодическая публикация демо-целей/дельт (внутренний таймер ноды)."""
+        g = lambda n: float(self.get_parameter(n).value)
+        now = self.get_clock().now().to_msg()
+        if self.demo_goal_pubs:
+            yaw = math.radians(g("demo_yaw_deg"))
+            q = Rotation.from_euler("xyz", [yaw, 0.0, 0.0]).as_quat()
+            ys = {"left": g("demo_y_l"), "right": g("demo_y_r")}
+            for s, pub in self.demo_goal_pubs.items():
+                ps = PoseStamped()
+                ps.header.frame_id = self.base_frame
+                ps.header.stamp = now
+                ps.pose.position.x, ps.pose.position.y = g("demo_x"), ys[s]
+                ps.pose.position.z = g("demo_z")
+                ps.pose.orientation.x, ps.pose.orientation.y = q[0], q[1]
+                ps.pose.orientation.z, ps.pose.orientation.w = q[2], q[3]
+                pub.publish(ps)
+            self.get_logger().info("demo: опубликованы абсолютные цели (PoseStamped)")
+        if self.demo_delta_pubs:
+            for s, pub in self.demo_delta_pubs.items():
+                ts = TwistStamped()
+                ts.header.frame_id = self.base_frame
+                ts.header.stamp = now
+                ts.twist.linear.x, ts.twist.linear.z = g("demo_dx"), g("demo_dz")
+                pub.publish(ts)
+            self.get_logger().info(
+                f"demo: delta dp=(+{g('demo_dx'):.3f},0,+{g('demo_dz'):.3f}) м")
 
     # ------------------------------------------------------------ helpers
     def on_js(self, msg: JointState):

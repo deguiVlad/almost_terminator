@@ -49,7 +49,6 @@ transient-local /robot_description). TF2 используется только �
 """
 import json
 import math
-from pathlib import Path
 
 from arm_ik._math_compat import np
 import rclpy
@@ -70,10 +69,9 @@ except ImportError:  # graceful degradation: нода стартует и счи
     CmdSetMotorPosition = None
     SetMotorPosition = None
 
-from arm_ik.kinematics import (fk, fk_tcp, geometric_jacobian, ik_dls,
-                               ik_multi_seed, clip_to_limits, make_default_arm,
-                               pose_error, delta_to_T, pose_to_T as mat_from_posquat,
-                               _tmat)
+from arm_ik.kinematics import (fk, geometric_jacobian, ik_dls, ik_multi_seed,
+                               clip_to_limits, make_default_arm, pose_error,
+                               delta_to_T)
 from arm_ik.collision import TableGuard
 from arm_ik.trajectory import joint_space_profile
 
@@ -469,7 +467,6 @@ class ArmIKNode(Node):
         self.joints = values
         self._last_joint_state_time = self.get_clock().now()
         self._joint_state_stale_warned = False
-        self._joint_state_received = True
 
     def q_meas(self, model):
         missing = [name for name in model.names if name not in self.joints]

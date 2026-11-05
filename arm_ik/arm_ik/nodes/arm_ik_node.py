@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """ROS 2 узел обратной кинематики обеих рук TienKung 2.0 Pro (7 DOF на руку).
 
-Дерево звеньев для IK строится из топиков симулятора /tf и /tf_static
-(модуль arm_ik.tree_from_tf); файлы URDF/JSON-конфиги не читаются. Время —
-из /clock (запускается с use_sim_time, проверка источника времени выполняется
-на старте ноды).
+Кинематическая модель IK строится из URDF (файл urdf_path или
+transient-local /robot_description). TF2 используется только для переноса
+входных целей между системами координат.
 
 Интерфейсы:
   ВХОД (два способа задать позу кисти):
@@ -157,8 +156,6 @@ class ArmIKNode(Node):
         # Единственный источник — топики симулятора /tf и /tf_static
         # (модуль arm_ik.tree_from_tf); файловые режимы (URDF/JSON-конфиги)
         # из пакета вычищены полностью.
-        self.declare_parameter("tf_wait_timeout", 10.0) # с ожидания первого полного дерева TF
-        self.declare_parameter("tf_refresh_period", 5.0) # с периодической пересборки цепочки из TF
         # --- параметры delta-целей (TwistStamped на /arm_ik/delta_{left,right}) ---
         self.declare_parameter("delta_reference", "measured")  # measured | last_goal
         self.declare_parameter("delta_accumulate", True)       # потоковые delta-команды накапливаются от последней цели
@@ -184,14 +181,12 @@ class ArmIKNode(Node):
         # ---------------- источник дерева звеньев для IK ----------------
         # Цепочка звеньев строится из топиков симулятора /tf и /tf_static
         # (см. arm_ik.tree_from_tf); файлы URDF/JSON не читаются.
-        self.tf_wait_timeout = float(self.get_parameter("tf_wait_timeout").value)
-        self.tf_refresh = float(self.get_parameter("tf_refresh_period").value)
         # стартовые модели — встроенная заглушка (нужны сразу для FK/телеметрии),
         # затем перезаменяются деревом из /tf+/tf_static, как только оно появится
         # в буфере TF2.
         self.models = {"left": make_default_arm("left"),
                        "right": make_default_arm("right")}
-        self._tf_models_ready = False
+        self._models_ready = False
         for m in self.models.values():
             m.base_frame = self.kinematics_base_frame
         tof = self.get_parameter("tcp_offset").value
@@ -250,7 +245,6 @@ class ArmIKNode(Node):
         # Совместимость с вариантами обработчика, читающими fine_max из executor.
         for ex in self.exec.values():
             ex.fine_max = self.fine_max
-        self._tf_last_try = None      # когда последний раз просили дерево TF
 
         # ---------------- ROS интерфейсы ----------------
         self.cmd_pub = None
@@ -277,8 +271,7 @@ class ArmIKNode(Node):
             "left": self.create_publisher(String, "/arm_ik/left/status", 10),
             "right": self.create_publisher(String, "/arm_ik/right/status", 10)}
 
-        # TF2: перенос произвольной рамки цели в base_frame + источник дерева
-        # звеньев для IK (топики симулятора /tf и /tf_static)
+        # TF2: перенос произвольной рамки цели в base_frame.
         self.tf_buffer = tf2_ros.Buffer()
         tf2_ros.TransformListener(self.tf_buffer, self)
 
@@ -291,7 +284,7 @@ class ArmIKNode(Node):
                     durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL))
         except Exception:
             pass
-        # первая попытка построить дерево — сразу, далее по таймеру step
+        # Первая попытка построить кинематическую модель из URDF.
         self.try_build_urdf_models()
 
         cbg = ReentrantCallbackGroup()
@@ -323,7 +316,7 @@ class ArmIKNode(Node):
 
         self.get_logger().info(
             f"arm_ik_node ready | tips={[m.tip_link for m in self.models.values()]} | "
-            f"tree=/tf+tf_static{' (ждём дерево)' if not self._tf_models_ready else ' (получено)'} | "
+            f"model=URDF{' (ждём дерево)' if not self._models_ready else ' (получено)'} | "
             f"guard={'ON h=%.2f' % self.guard.h if self.guard else 'OFF'} | "
             f"srv={'on' if HAVE_SRV else 'off (нет сгенерированного arm_ik.srv)'}")
 
@@ -366,7 +359,7 @@ class ArmIKNode(Node):
         """Полный URDF из robot_description — источник кинематики и лимитов."""
         try:
             self._urdf_xml = str(msg.data)
-            self.try_build_urdf_models(force=True)
+            self.try_build_urdf_models()
         except Exception:
             pass
 
@@ -389,9 +382,9 @@ class ArmIKNode(Node):
                 self.get_logger().debug(f"tf snapshot недоступен: {e}")
         return static_msgs, dyn_msgs
 
-    def try_build_urdf_models(self, force=False):
+    def try_build_urdf_models(self):
         """Build both arm models from an explicit URDF file or /robot_description."""
-        if getattr(self, "_urdf_models_ready", False):
+        if getattr(self, "_models_ready", False):
             return True
 
         candidates = []
@@ -431,8 +424,8 @@ class ArmIKNode(Node):
                 for side, model in models.items():
                     model.base_frame = self.kinematics_base_frame
                     self.exec[side].model = model
-                self._urdf_models_ready = True
-                self._tf_models_ready = True
+                self._models_ready = True
+                self._models_ready = True
                 self._urdf_wait_warned = False
                 self.get_logger().info(
                     "IK models loaded from %s (base=%s): %s" % (
@@ -589,7 +582,7 @@ class ArmIKNode(Node):
 
     def set_goal(self, side, T_des, position_only=False, allow_position_fallback=True):
         """Общий конвейер: IK -> траектория (с защитой стола) -> исполнение."""
-        if not self._tf_models_ready:
+        if not self._models_ready:
             self.get_logger().warn(f"[{side}] IK rejected: URDF model is not ready")
             return False
         ex = self.exec[side]
@@ -692,7 +685,7 @@ class ArmIKNode(Node):
 
     def on_goal(self, side, goal: PoseStamped):
         """Абсолютная шестимерная цель TCP (PoseStamped)."""
-        if not self._tf_models_ready:
+        if not self._models_ready:
             self.get_logger().warn(f"[{side}] goal rejected: waiting for /robot_description")
             return
         try:
@@ -721,7 +714,7 @@ class ArmIKNode(Node):
         delta_accumulate=true — дельты суммируются от опорной точки первой дельты
         серии (джойстик-режим: каждая новая команда двигает дальше).
         """
-        if not self._tf_models_ready:
+        if not self._models_ready:
             self.get_logger().warn(f"[{side}] delta rejected: URDF model is not ready")
             return
         ex = self.exec[side]
@@ -799,12 +792,11 @@ class ArmIKNode(Node):
     # ------------------------------------------------------------ control loop
     def step(self):
         now = self.get_clock().now().to_msg()
-        # периодическая пересборка дерева звеньев из /tf + /tf_static
-        # (сначала — часто, пока дерево не получено; затем раз в tf_refresh)
+        # Повторная попытка загрузить URDF, пока модель не готова.
         self.try_build_urdf_models()
         if not getattr(self, "_clock_checked", False):
             self._check_sim_clock()
-        if not self._tf_models_ready:
+        if not self._models_ready:
             return
         joint_age = (float("inf") if self._last_joint_state_time is None else
                      (self.get_clock().now() - self._last_joint_state_time).nanoseconds / 1e9)

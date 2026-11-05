@@ -136,10 +136,19 @@ class _Array(list):
 
     # ---------- арифметика поэлементно ----------
     def _binop(self, other, f):
-        if isinstance(other, (int, float)):
-            return _Array([f(float(x), other) for x in self])
-        oth = [_Array(x) if isinstance(x, list) else x for x in other]
-        return _Array([f(float(a), float(b)) for a, b in zip(self, oth)])
+        def apply(a, b):
+            a_seq = isinstance(a, (list, tuple, _Array))
+            b_seq = isinstance(b, (list, tuple, _Array))
+            if a_seq:
+                if b_seq:
+                    if len(a) != len(b):
+                        raise ValueError("array operands must have matching shapes")
+                    return _Array([apply(x, y) for x, y in zip(a, b)])
+                return _Array([apply(x, b) for x in a])
+            if b_seq:
+                raise ValueError("array operands must have matching shapes")
+            return f(float(a), float(b))
+        return apply(self, other)
 
     def __add__(self, o):
         return self._binop(o, lambda a, b: a + b)
@@ -163,16 +172,28 @@ class _Array(list):
         return self._binop(o, lambda a, b: a / b)
 
     def __neg__(self):
-        return _Array([-float(x) for x in self])
+        return _Array([-x if not isinstance(x, (list, tuple, _Array))
+                       else -_wrap(x) for x in self])
 
     def __abs__(self):
-        return _Array([abs(float(x)) for x in self])
+        return _Array([abs(x) if not isinstance(x, (list, tuple, _Array))
+                       else abs(_wrap(x)) for x in self])
 
     # сравнения -> списки bool (для where/any/all)
     def _cmp(self, o, f):
-        if isinstance(o, (int, float)):
-            return [f(float(x), o) for x in self]
-        return [f(float(a), float(b)) for a, b in zip(self, o)]
+        def compare(a, b):
+            a_seq = isinstance(a, (list, tuple, _Array))
+            b_seq = isinstance(b, (list, tuple, _Array))
+            if a_seq:
+                if b_seq:
+                    if len(a) != len(b):
+                        raise ValueError("comparison operands must have matching shapes")
+                    return [compare(x, y) for x, y in zip(a, b)]
+                return [compare(x, b) for x in a]
+            if b_seq:
+                raise ValueError("comparison operands must have matching shapes")
+            return f(float(a), float(b))
+        return compare(self, o)
 
     def __le__(self, o):
         return self._cmp(o, lambda a, b: a <= b)
@@ -265,10 +286,19 @@ class _NP:
 
     @staticmethod
     def allclose(a, b, atol=1e-8, rtol=1e-5):
-        for x, y in zip(a, b):
-            if abs(float(x) - float(y)) > atol + rtol * abs(float(y)):
-                return False
-        return True
+        def flatten(value):
+            out = []
+            for item in value:
+                if isinstance(item, (list, tuple, _Array)):
+                    out.extend(flatten(item))
+                else:
+                    out.append(float(item))
+            return out
+        aa, bb = flatten(a), flatten(b)
+        if len(aa) != len(bb):
+            return False
+        return all(abs(x - y) <= atol + rtol * abs(y)
+                   for x, y in zip(aa, bb))
 
     @staticmethod
     def zeros(n, dtype=None):
@@ -330,7 +360,13 @@ class _NP:
 
     @staticmethod
     def clip(v, lo, hi):
-        return _Array([min(hi, max(lo, float(x))) for x in v])
+        values = list(v)
+        lows = list(lo) if isinstance(lo, (list, tuple, _Array)) else [lo] * len(values)
+        highs = list(hi) if isinstance(hi, (list, tuple, _Array)) else [hi] * len(values)
+        if len(lows) != len(values) or len(highs) != len(values):
+            raise ValueError("clip bounds must be scalar or match the input length")
+        return _Array([min(float(h), max(float(l), float(x)))
+                       for x, l, h in zip(values, lows, highs)])
 
     @staticmethod
     def sign(x):

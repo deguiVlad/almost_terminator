@@ -98,7 +98,7 @@ def generate_launch_description():
     d = lambda name, val, desc="": DeclareLaunchArgument(name, default_value=val, description=desc)
     return LaunchDescription([
         d("use_sim_time", "false", "время из /clock (симулятор)"),
-        d("base_frame", "waist_yaw_link", "рамка абсолютных целей"),
+        d("base_frame", "pelvis", "рамка целей и геометрии стола"),
         d("rate_hz", "50", "частота контура и генерации траектории"),
         d("joint_state_timeout", "0.5", "watchdog свежести /joint_states, с"),
         d("spd_limit", "0.8", "жёсткий лимит скорости моторов рук, рад/с"),

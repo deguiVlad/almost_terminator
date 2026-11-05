@@ -477,7 +477,7 @@ class ArmIKNode(Node):
     def to_base_T(self, goal: PoseStamped):
         """PoseStamped в любой TF-рамке -> матрица 4x4 в base_frame."""
         fid = goal.header.frame_id
-        if fid in ("", self.base_frame, "base_link"):
+        if fid in ("", self.base_frame):
             return pose_to_T(goal.pose)
         tfm = self.tf_buffer.lookup_transform(self.base_frame, fid,
                                               rclpy.time.Time(),
@@ -606,7 +606,7 @@ class ArmIKNode(Node):
         fid = msg.header.frame_id
         dpos = np.array([msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z])
         drot = np.array([msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z])
-        if fid not in ("", self.base_frame, "base_link"):
+        if fid not in ("", self.base_frame):
             try:
                 tfm = self.tf_buffer.lookup_transform(
                     self.base_frame, fid, rclpy.time.Time(),

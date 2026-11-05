@@ -654,6 +654,10 @@ class ArmIKNode(Node):
                     f"[{side}] position reachable; requested orientation relaxed "
                     "to the reachable wrist orientation")
 
+        if ok and position_only and not relaxed_orientation:
+            T_des_model[:3, :3] = fk(model, q_sol)[0][:3, :3]
+            ex.T_des = T_des_model
+
         dt = 1.0 / self.rate_hz
         if ok and self.guard is not None:
             traj = joint_space_profile(q_now, q_sol, self.spd, self.a_max, dt)
@@ -664,7 +668,7 @@ class ArmIKNode(Node):
         if ok and not bad:
             ex.traj = joint_space_profile(q_now, q_sol, self.spd, self.a_max, dt)
             ex.idx, ex.state, ex.fine_cycles = 0, ArmExecutor.TRAJ, 0
-            ex.last_T_des = T_des.copy()
+            ex.last_T_des = np.linalg.inv(T_model_base) @ T_des_model
             self.get_logger().info(
                 f"[{side}] IK решена: {len(ex.traj)} точек (~{(len(ex.traj)-1)/self.rate_hz:.1f} c)")
             return True

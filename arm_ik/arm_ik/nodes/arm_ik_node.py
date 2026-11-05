@@ -178,6 +178,8 @@ class ArmIKNode(Node):
         self.declare_parameter("offset_rate_hz", 10.0)
 
         self.base_frame = self.get_parameter("base_frame").value
+        self.kinematics_base_frame = self.get_parameter("kinematics_base_frame").value
+        self.urdf_path = str(self.get_parameter("urdf_path").value).strip()
         # ---------------- источник дерева звеньев для IK ----------------
         # Цепочка звеньев строится из топиков симулятора /tf и /tf_static
         # (см. arm_ik.tree_from_tf); файлы URDF/JSON не читаются.
@@ -190,7 +192,7 @@ class ArmIKNode(Node):
                        "right": make_default_arm("right")}
         self._tf_models_ready = False
         for m in self.models.values():
-            m.base_frame = self.base_frame
+            m.base_frame = self.kinematics_base_frame
         tof = self.get_parameter("tcp_offset").value
         if tof:
             v = [float(t) for t in str(tof).split(",")]
@@ -354,7 +356,7 @@ class ArmIKNode(Node):
                 "рекомендуется ros2 launch ... use_sim_time:=true")
 
     def on_robot_desc(self, msg):
-        """robot_description (URDF-XML) — источник точных лимитов суставов."""
+        """Полный URDF из robot_description — источник кинематики и лимитов."""
         try:
             self._urdf_xml = str(msg.data)
             self.try_build_tree_from_tf(force=True)
@@ -388,6 +390,41 @@ class ArmIKNode(Node):
         симулятор опубликовал полные /tf+/tf_static — цепочка звеньев
         пересобирается из TF и executor'ы переключаются на новые модели.
         """
+        if getattr(self, "_urdf_models_ready", False):
+            return True
+        # URDF-файл или /robot_description — авторитетный источник геометрии.
+        urdf_xml = self._urdf_xml
+        if self.urdf_path:
+            try:
+                with open(self.urdf_path, "r", encoding="utf-8") as stream:
+                    urdf_xml = stream.read()
+            except OSError as e:
+                self.get_logger().error(
+                    "URDF-файл недоступен (%s); IK-модель из TF не подменяю: %s" %
+                    (self.urdf_path, e))
+                return False
+        if urdf_xml:
+            try:
+                from arm_ik.urdf_model import build_models_from_urdf
+                models = build_models_from_urdf(
+                    urdf_xml, base_link=self.kinematics_base_frame)
+                self.models = models
+                for side, model in models.items():
+                    model.base_frame = self.kinematics_base_frame
+                    self.exec[side].model = model
+                self._urdf_models_ready = True
+                self._tf_models_ready = True
+                self.get_logger().info(
+                    "IK-модели собраны из URDF: base=%s; %s" %
+                    (self.kinematics_base_frame, ", ".join(
+                        "%s: %s -> %s, motors=%s" %
+                        (s, m.names[0], m.tip_link, m.ids)
+                        for s, m in models.items())))
+                return True
+            except Exception as e:
+                self.get_logger().error("ошибка построения IK из URDF: %s" % e)
+                return False
+
         now = self.get_clock().now()
         if not force:
             last = self._tf_last_try
@@ -440,7 +477,7 @@ class ArmIKNode(Node):
             or not getattr(self, "_tf_models_ready", False)
         self.models = models
         for m in self.models.values():
-            m.base_frame = self.base_frame
+            m.base_frame = self.kinematics_base_frame
         if changed:
             for s, ex in self.exec.items():
                 ex.model = self.models[s]
@@ -486,10 +523,22 @@ class ArmIKNode(Node):
 
     # ------------------------------------------------------------ helpers
     def on_js(self, msg: JointState):
-        self.joints.update(dict(zip(msg.name, msg.position)))
+        if len(msg.name) != len(msg.position):
+            return
+        values = dict(zip(msg.name, msg.position))
+        if not all(np.isfinite(float(v)) for v in values.values()):
+            return
+        self.joints.update(values)
+        self._joint_state_received = True
 
     def q_meas(self, model):
-        return np.array([self.joints.get(n, 0.0) for n in model.names])
+        missing = [name for name in model.names if name not in self.joints]
+        if missing:
+            raise RuntimeError("нет измерений /joint_states для: " + ", ".join(missing))
+        q = np.asarray([self.joints[n] for n in model.names], dtype=float)
+        if not np.all(np.isfinite(q)):
+            raise RuntimeError("некорректные значения /joint_states")
+        return q
 
     def make_cmd(self, model, q_target, spd=None):
         """Пачка команд моторов руки. Формат — как в docs/INTERFACES.md и hello_world:
@@ -531,6 +580,19 @@ class ArmIKNode(Node):
         return seeds[: max(1, self.n_seeds)]
 
     # ------------------------------------------------------------ goals
+    def _lookup_T(self, target_frame, source_frame):
+        """Матрица T_target_source по актуальному TF2."""
+        if target_frame == source_frame:
+            return np.eye(4)
+        tfm = self.tf_buffer.lookup_transform(
+            target_frame, source_frame, rclpy.time.Time(),
+            timeout=rclpy.duration.Duration(seconds=0.5))
+        t, r = tfm.transform.translation, tfm.transform.rotation
+        T = np.eye(4)
+        T[:3, :3] = Rotation.from_quat([r.x, r.y, r.z, r.w]).as_matrix()
+        T[:3, 3] = [t.x, t.y, t.z]
+        return T
+
     def set_goal(self, side, T_des):
         """Общий конвейер: IK -> траектория (с защитой стола) -> исполнение."""
         if not self._tf_models_ready:
@@ -543,8 +605,16 @@ class ArmIKNode(Node):
             return False
         if self.guard is not None:
             T_des[:3, 3] = self.guard.clamp_target_above_table(T_des[:3, 3])
-        ex.T_des = T_des
-        q_now = self.q_meas(model)
+        try:
+            T_model_base = self._lookup_T(
+                self.kinematics_base_frame, self.base_frame)
+            T_des_model = T_model_base @ T_des
+            q_now = self.q_meas(model)
+        except Exception as e:
+            self.get_logger().error("[%s] цель отклонена: нет TF/joint state: %s" %
+                                    (side, e))
+            return False
+        ex.T_des = T_des_model
 
         barrier = None
         if self.guard is not None:
@@ -553,7 +623,7 @@ class ArmIKNode(Node):
         # 1) IK: multi-seed DLS с барьером стола
         seeds = self.seed_poses(model, q_now)
         q_sol, ok, epos, erot = ik_multi_seed(
-            model, T_des, seeds, max_iter=250, tol_pos=self.tol_pos * 0.5,
+            model, T_des_model, seeds, max_iter=250, tol_pos=self.tol_pos * 0.5,
             tol_rot=self.tol_rot * 0.5, barrier=barrier)
 
         dt = 1.0 / self.rate_hz
@@ -573,11 +643,11 @@ class ArmIKNode(Node):
 
         # 2) план Б: заход через waypoint строго над столом (две IK-фазы)
         if self.guard is not None:
-            wp = T_des.copy()
-            wp[:3, 3] = self.guard.clamp_target_above_table(wp[:3, 3] + np.array([0.0, 0.0, self.lift]))
+            wp = T_des_model.copy()
+            # waypoint поднимаем в системе IK; стол уже проверен в planning frame
             q_wp, ok1, _, _ = ik_multi_seed(model, wp, seeds, max_iter=200,
                                             barrier=barrier)
-            q_fin, ok2, _, _ = ik_multi_seed(model, T_des, [q_wp] + seeds, max_iter=200,
+            q_fin, ok2, _, _ = ik_multi_seed(model, T_des_model, [q_wp] + seeds, max_iter=200,
                                              barrier=barrier)
             if ok1 and ok2:
                 t1 = joint_space_profile(q_now, q_wp, self.spd, self.a_max, dt)
@@ -608,10 +678,11 @@ class ArmIKNode(Node):
         self.set_goal(side, T_des)
 
     def tcp_pose_T(self, side):
-        """Текущая измеренная поза TCP в base_frame (4x4) по /joint_states."""
+        """Измеренная TCP-поза, возвращаемая в planning base_frame (pelvis)."""
         model = self.models[side]
-        pos, quat_wxyz = fk_tcp(model, self.q_meas(model))
-        return mat_from_posquat(pos, quat_wxyz)
+        T_model_tcp = fk(model, self.q_meas(model))[0]
+        T_base_model = self._lookup_T(self.base_frame, self.kinematics_base_frame)
+        return T_base_model @ T_model_tcp
 
     def on_delta(self, side, msg: TwistStamped):
         """Относительная цель: смещение TCP на 6-мерный вектор (TwistStamped).
@@ -681,6 +752,7 @@ class ArmIKNode(Node):
         model = self.models[side]
         T_des = pose_to_T(req.goal.pose)
         q_init = np.zeros(7) if req.use_zero_seed else self.q_meas(model)
+        T_des = self._lookup_T(self.kinematics_base_frame, self.base_frame) @ T_des
         q, ok, hist = ik_dls(model, T_des, q_init, max_iter=250)
         res.success = bool(ok)
         res.joint_names = model.names

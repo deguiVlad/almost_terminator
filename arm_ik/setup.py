@@ -24,7 +24,7 @@ from setuptools import setup
 
 setup(
     name="arm_ik",
-    version="0.4.0",
+    version="0.4.1",
     packages=["arm_ik", "arm_ik.nodes"],
     # файловых конфигов (config/*.json) в пакете больше нет: единственное
     # дерево звеньев для IK строится из топиков симулятора /tf + /tf_static
@@ -36,9 +36,11 @@ setup(
         ("share/arm_ik/launch", glob.glob("launch/*.py")),
         # standalone-запуск единственной ноды -> lib/arm_ik/ (script_dir из setup.cfg)
         ("lib/arm_ik", [
-            "bin/_bootstrap.py", "bin/run_arm_ik.py",
+            "bin/_bootstrap.py",
             "arm_ik/nodes/arm_ik_node.py"]),
     ],
+    scripts=["bin/run_arm_ik.py"],
+    tests_require=["pytest"],
     zip_safe=True,
     maintainer="hackathon team",
     maintainer_email="dev@example.com",

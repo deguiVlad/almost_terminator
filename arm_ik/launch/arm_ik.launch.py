@@ -6,7 +6,7 @@ transient-local топика /robot_description. TF2 используется д
 
     ros2 launch arm_ik arm_ik.launch.py
     ros2 launch arm_ik arm_ik.launch.py h_table:=0.95
-    ros2 launch arm_ik arm_ik.launch.py demo_goals:=true goal_x:=0.45 goal_z:=1.0
+    ros2 launch arm_ik arm_ik.launch.py demo:=true goal_x:=0.45 goal_z:=1.0
     ros2 launch arm_ik arm_ik.launch.py demo_delta:=true delta_side:=right delta_x:=0.05
 
 Отдельных демо-нод больше нет: цели публикует сама нода при demo_goals/demo_delta.

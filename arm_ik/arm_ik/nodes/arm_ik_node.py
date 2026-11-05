@@ -760,17 +760,36 @@ class ArmIKNode(Node):
 
     # ------------------------------------------------------------ service
     def solve_srv(self, req, res):
-        side = req.side if req.side in ("left", "right") else "right"
+        """Solve a pose without publishing motor commands."""
+        if req.side not in ("left", "right") or not self._models_ready:
+            res.success = False
+            res.final_error = float("inf")
+            return res
+        side = req.side
         model = self.models[side]
-        T_des = pose_to_T(req.goal.pose)
-        q_init = np.zeros(7) if req.use_zero_seed else self.q_meas(model)
-        T_des = self._lookup_T(self.kinematics_base_frame, self.base_frame) @ T_des
-        q, ok, hist = ik_dls(model, T_des, q_init, max_iter=250)
-        res.success = bool(ok)
-        res.joint_names = model.names
-        res.positions = [float(v) for v in q]
-        res.motor_ids = [int(i) for i in model.ids]
-        res.final_error = float(hist[-1]) if hist else 1e9
+        try:
+            if not req.use_zero_seed:
+                if self._last_joint_state_time is None or (
+                        self.get_clock().now() - self._last_joint_state_time
+                ).nanoseconds / 1e9 > self.joint_state_timeout:
+                    raise RuntimeError("joint feedback is stale")
+                q_init = self.q_meas(model)
+            else:
+                q_init = np.zeros(len(model.joints))
+            T_base = self.to_base_T(req.goal)
+            T_model = self._lookup_T(
+                self.kinematics_base_frame, self.base_frame) @ T_base
+            q, ok, hist = ik_dls(model, T_model, q_init, max_iter=250)
+            res.success = bool(ok)
+            res.joint_names = model.names
+            res.positions = [float(v) for v in q]
+            res.motor_ids = [int(i) for i in model.ids]
+            res.final_error = float(hist[-1]) if hist else float("inf")
+        except Exception as exc:
+            self.get_logger().warn("[%s] solve service rejected request: %s"
+                                   % (side, exc))
+            res.success = False
+            res.final_error = float("inf")
         return res
 
     # ------------------------------------------------------------ control loop

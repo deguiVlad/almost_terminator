@@ -177,7 +177,19 @@ def pose_error(T_cur44, T_des44):
 
 
 def clip_to_limits(q, model: ArmModel, margin=0.0):
-    return np.clip(q, model.lower + margin, model.upper - margin)
+    """Clamp a joint vector to URDF limits, keeping an optional safety margin."""
+    if not math.isfinite(float(margin)) or margin < 0.0:
+        raise ValueError("margin must be finite and non-negative")
+    lower, upper = model.lower, model.upper
+    if any(float(upper[i] - lower[i]) <= 2.0 * margin
+           for i in range(len(model.joints))):
+        raise ValueError("margin leaves no valid interval for at least one joint")
+    values = np.asarray(q, dtype=float)
+    if len(values) != len(model.joints):
+        raise ValueError("joint vector length does not match the arm model")
+    if not all(math.isfinite(float(v)) for v in values):
+        raise ValueError("joint vector contains non-finite values")
+    return np.clip(values, lower + margin, upper - margin)
 
 
 def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
@@ -287,7 +299,23 @@ def ik_multi_seed(model: ArmModel, T_des44, seeds, n_seeds=None, jitter=None, **
     Возвращает (q, ok, err_pos, err_rot).
     """
     import random as _rnd
-    seeds = [np.asarray(s, dtype=float) for s in seeds]         if len(np.shape(seeds)) == 2 else [np.asarray(seeds, dtype=float)]
+    if seeds is None:
+        raise ValueError("at least one IK seed is required")
+    raw_seeds = list(seeds)
+    if not raw_seeds:
+        raise ValueError("at least one IK seed is required")
+    first = raw_seeds[0]
+    if isinstance(first, (list, tuple)) or hasattr(first, "ndim"):
+        seeds = [np.asarray(seed, dtype=float) for seed in raw_seeds]
+    else:
+        seeds = [np.asarray(raw_seeds, dtype=float)]
+    for seed in seeds:
+        if len(seed) != len(model.joints):
+            raise ValueError("IK seed length does not match the arm model")
+        if not all(math.isfinite(float(v)) for v in seed):
+            raise ValueError("IK seed contains non-finite values")
+    if n_seeds is not None and int(n_seeds) < 1:
+        raise ValueError("n_seeds must be >= 1")
     if n_seeds and n_seeds > len(seeds):
         base = seeds[0]
         amp = 0.5 if jitter is None else float(jitter)

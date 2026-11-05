@@ -292,7 +292,7 @@ class ArmIKNode(Node):
         except Exception:
             pass
         # первая попытка построить дерево — сразу, далее по таймеру step
-        self.try_build_tree_from_tf()
+        self.try_build_urdf_models()
 
         cbg = ReentrantCallbackGroup()
         if HAVE_SRV:
@@ -366,7 +366,7 @@ class ArmIKNode(Node):
         """Полный URDF из robot_description — источник кинематики и лимитов."""
         try:
             self._urdf_xml = str(msg.data)
-            self.try_build_tree_from_tf(force=True)
+            self.try_build_urdf_models(force=True)
         except Exception:
             pass
 
@@ -389,67 +389,64 @@ class ArmIKNode(Node):
                 self.get_logger().debug(f"tf snapshot недоступен: {e}")
         return static_msgs, dyn_msgs
 
-    def try_build_tree_from_tf(self, force=False):
-        """Пересобрать кинематические модели обеих рук из /tf + /tf_static.
-
-        Вызывается при старте и периодически (tf_refresh_period) из step():
-        пока дерево не получено, нода живёт на шаблонной модели; как только
-        симулятор опубликовал полные /tf+/tf_static — цепочка звеньев
-        пересобирается из TF и executor'ы переключаются на новые модели.
-        """
+    def try_build_urdf_models(self, force=False):
+        """Build both arm models from an explicit URDF file or /robot_description."""
         if getattr(self, "_urdf_models_ready", False):
             return True
-        # URDF — единственный достоверный источник осей, origin и limits.
-        # Из текущих /tf transforms нельзя восстановить оси вращения URDF:
-        # динамический TF уже содержит поворот сустава. Поэтому TF-only fallback
-        # намеренно запрещён (иначе нода строила бы физически неверную кинематику).
-        urdf_xml = self._urdf_xml
+
+        candidates = []
         if self.urdf_path:
             try:
                 with open(self.urdf_path, "r", encoding="utf-8") as stream:
-                    urdf_xml = stream.read()
+                    candidates.append(("urdf_path", stream.read()))
             except OSError as exc:
                 self.get_logger().warn(
-                    "Не удалось прочитать urdf_path=%s; пробую /robot_description: %s"
+                    "Cannot read urdf_path=%s; trying /robot_description: %s"
                     % (self.urdf_path, exc))
-        if not urdf_xml:
+        if self._urdf_xml and all(xml != self._urdf_xml for _, xml in candidates):
+            candidates.append(("/robot_description", self._urdf_xml))
+
+        if not candidates:
             if not getattr(self, "_urdf_wait_warned", False):
                 self.get_logger().warn(
-                    "IK ожидает URDF: задайте urdf_path или опубликуйте "
+                    "IK is waiting for a valid URDF: set urdf_path or publish "
                     "transient-local /robot_description (std_msgs/String). "
-                    "Использовать геометрию только из /tf небезопасно.")
+                    "Building joint axes from dynamic TF is intentionally disabled.")
                 self._urdf_wait_warned = True
             return False
 
-        try:
-            from arm_ik.urdf_model import build_models_from_urdf
-            models = build_models_from_urdf(
-                urdf_xml, base_link=self.kinematics_base_frame)
-            if set(models) != {"left", "right"}:
-                raise ValueError(
-                    "URDF must contain both 7-DOF arm chains; found: %s"
-                    % sorted(models))
-            for side, model in models.items():
-                if len(model.joints) != 7:
-                    raise ValueError("%s arm has %d joints, expected 7"
-                                     % (side, len(model.joints)))
-            self.models = models
-            for side, model in models.items():
-                model.base_frame = self.kinematics_base_frame
-                self.exec[side].model = model
-            self._urdf_models_ready = True
-            self._tf_models_ready = True
-            self._urdf_wait_warned = False
-            self.get_logger().info(
-                "IK-модели построены из URDF: base=%s; %s" % (
-                    self.kinematics_base_frame,
-                    ", ".join("%s: %s -> %s, motors=%s" % (
-                        side, model.names[0], model.tip_link, model.ids)
-                        for side, model in models.items())))
-            return True
-        except Exception as exc:
-            self.get_logger().error("Ошибка построения IK из URDF: %s" % exc)
-            return False
+        from arm_ik.urdf_model import build_models_from_urdf
+        errors = []
+        for source, urdf_xml in candidates:
+            try:
+                models = build_models_from_urdf(
+                    urdf_xml, base_link=self.kinematics_base_frame)
+                if set(models) != {"left", "right"}:
+                    raise ValueError("expected both arm chains, found %s" % sorted(models))
+                for side, model in models.items():
+                    if len(model.joints) != 7:
+                        raise ValueError("%s arm has %d joints, expected 7"
+                                         % (side, len(model.joints)))
+                self.models = models
+                for side, model in models.items():
+                    model.base_frame = self.kinematics_base_frame
+                    self.exec[side].model = model
+                self._urdf_models_ready = True
+                self._tf_models_ready = True
+                self._urdf_wait_warned = False
+                self.get_logger().info(
+                    "IK models loaded from %s (base=%s): %s" % (
+                        source, self.kinematics_base_frame,
+                        ", ".join("%s: %s -> %s, motors=%s" % (
+                            side, model.names[0], model.tip_link, model.ids)
+                            for side, model in models.items())))
+                return True
+            except Exception as exc:
+                errors.append("%s: %s" % (source, exc))
+
+        self.get_logger().error("Could not build arm models from any URDF: %s"
+                                % " | ".join(errors))
+        return False
 
     def _demo_sides(self):
         side = str(self.get_parameter("demo_side").value)
@@ -804,7 +801,7 @@ class ArmIKNode(Node):
         now = self.get_clock().now().to_msg()
         # периодическая пересборка дерева звеньев из /tf + /tf_static
         # (сначала — часто, пока дерево не получено; затем раз в tf_refresh)
-        self.try_build_tree_from_tf()
+        self.try_build_urdf_models()
         if not getattr(self, "_clock_checked", False):
             self._check_sim_clock()
         if not self._tf_models_ready:

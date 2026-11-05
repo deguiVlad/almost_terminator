@@ -48,8 +48,9 @@ class TableGuard:
         Это консервативная геометрическая аппроксимация для плоского стола.
         Она не заменяет проверку полной collision geometry через MoveIt/FCL.
         """
-        if link_radius < 0.0 or sample_step <= 0.0:
-            raise ValueError("link_radius must be >= 0 and sample_step must be > 0")
+        if (not np.isfinite(float(link_radius)) or not np.isfinite(float(sample_step))
+                or link_radius < 0.0 or sample_step <= 0.0):
+            raise ValueError("link_radius must be finite and >= 0; sample_step finite and > 0")
         Ts = chain_transforms(model, q)
         pts = [np.zeros(3)] + [T[:3, 3] for T in Ts]
         tcp = (Ts[-1] @ np.append(model.tcp_offset, 1.0))[:3]
@@ -111,7 +112,6 @@ class TableGuard:
 
     def clamp_goal(self, T44):
         """Возвращает копию T44 с z цели, поднятым над столом+запас."""
-        import copy as _copy
         T = np.array(T44, dtype=float).copy()
         p = self.clamp_target_above_table([float(v) for v in T[:3, 3]])
         T[:3, 3] = p

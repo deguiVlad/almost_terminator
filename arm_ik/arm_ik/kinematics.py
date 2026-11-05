@@ -271,37 +271,45 @@ def ik_multi_seed(model: ArmModel, T_des44, seeds, n_seeds=None, jitter=None, **
                 s[i] = min(max(s[i] + rng.uniform(-amp, amp),
                                float(model.lower[i])), float(model.upper[i]))
             seeds.append(s)
-    # страховка от локальных минимумов DLS: если ни один сид не сошёлся,
-    # запускаем дополнительные попытки с более сильным демпфированием —
-    # оно медленнее сходится, но устойчивее к переменной амплитуде шага
-    # (типичный случай: малая дельта-цель рядом с текущей позой).
+    # Текущий measured seed идёт первым. Если он уже решает задачу,
+    # возвращаем его сразу: альтернативные позы нужны только при неудаче.
+    # Раньше успешные попытки запускались повторно при выборе best, удваивая
+    # вычисления и иногда выполняя до 8 полных DLS-проходов.
+    early_exit = bool(kw.pop("early_exit", True))
     fallback_damps = kw.pop("fallback_damps", (0.10, 0.15))
-    attempts = [(s, dict(kw)) for s in seeds]
-    solved_any = False
-    for s, k in list(attempts):
-        q, ok, _h = ik_dls(model, T_des44, s, **k)
-        if ok:
-            solved_any = True
-            break
-    if not solved_any:
-        # ни один сид не сошёлся — дополнительные попытки с более сильным
-        # демпфированием (устойчивее к локальным минимумам малых дельт)
-        for damp in fallback_damps:
-            for s in seeds[: max(1, len(seeds) // 2)]:
-                k2 = dict(kw)
-                k2["damping"] = damp
-                k2["max_iter"] = max(int(kw.get("max_iter", 120)), 300)
-                attempts.append((s, k2))
     best, best_key = None, None
-    for s, k in attempts:
-        q, ok, hist = ik_dls(model, T_des44, s, **k)
+
+    def evaluate(seed, options):
+        q, ok, _hist = ik_dls(model, T_des44, seed, **options)
         T, _ = fk(model, q)
         e = pose_error(T, T_des44)
-        key = (not ok, float(np.linalg.norm(e[:3])) * 10 + float(np.linalg.norm(e[3:])),
+        epos = float(np.linalg.norm(e[:3]))
+        erot = float(np.linalg.norm(e[3:]))
+        key = (not ok, epos * 10.0 + erot,
                float(np.linalg.norm(q - np.asarray(seeds[0]))))
+        return (q, ok, epos, erot), key
+
+    # Каждая первичная попытка выполняется ровно один раз.
+    for seed in seeds:
+        candidate, key = evaluate(seed, kw)
         if best_key is None or key < best_key:
-            best, best_key = (q, ok, float(np.linalg.norm(e[:3])),
-                              float(np.linalg.norm(e[3:]))), key
+            best, best_key = candidate, key
+        if candidate[1] and early_exit:
+            return candidate
+
+    # Сильное демпфирование включаем только если ни один обычный seed
+    # не нашёл допустимое решение. Успешные первичные попытки не повторяем.
+    if best is None or not best[1]:
+        for damp in fallback_damps:
+            for seed in seeds[: max(1, len(seeds) // 2)]:
+                options = dict(kw)
+                options["damping"] = damp
+                options["max_iter"] = max(int(kw.get("max_iter", 120)), 300)
+                candidate, key = evaluate(seed, options)
+                if best_key is None or key < best_key:
+                    best, best_key = candidate, key
+                if candidate[1] and early_exit:
+                    return candidate
     return best
 
 

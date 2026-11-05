@@ -47,3 +47,12 @@ def test_urdf_model_uses_joint_axes_limits_and_fixed_tcp_orientation():
     assert abs(m.tcp_rpy[2]) > 1.0
     T, _ = fk(m, np.zeros(7))
     assert np.allclose(T[:3, :3], Rotation.from_euler('xyz', m.tcp_rpy).as_matrix(), atol=1e-6)
+
+
+
+def test_model_prefers_robot_tcp_link_names():
+    from arm_ik.urdf_model import build_arm_model
+    xml = _urdf().replace("L_base_link", "left_tcp_link")
+    model = build_arm_model(xml, "left", base_link="waist_yaw_link")
+    assert model.tip_link == "left_tcp_link"
+    assert len(model.joints) == 7

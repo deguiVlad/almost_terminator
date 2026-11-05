@@ -23,7 +23,7 @@ def joint_space_profile(q0, q1, v_max=0.8, a_max=0.4, dt=0.02):
         raise ValueError("v_max, a_max and dt must be positive")
     q0 = np.asarray(q0, float)
     q1 = np.asarray(q1, float)
-    if q0.shape != q1.shape or q0.ndim != 1 or q0.size == 0:
+    if q0.shape != q1.shape or q0.ndim != 1 or len(q0) == 0:
         raise ValueError("q0 and q1 must be non-empty one-dimensional arrays of equal length")
     if not np.all(np.isfinite(q0)) or not np.all(np.isfinite(q1)):
         raise ValueError("joint positions must be finite")

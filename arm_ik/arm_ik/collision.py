@@ -82,29 +82,22 @@ class TableGuard:
                     return True
         return False
 
-    def table_cost_gradient(self, model, q, k=50.0, link_radius=0.05):
-        """Мягкий барьер: градиент штрафа по q (7,), выталкивает звенья из стола.
-
-        Cost = Σ_i max(0, depth_i)^2 * k ; dq_step = -J_coll^T * dC/dp_i.
-        Возвращает dq_correction (7,) — добавить к шагу IK.
-        """
-        Ts = chain_transforms(model, q)
-        pts = [np.zeros(3)] + [T[:3, 3] for T in Ts]
-        tcp = (Ts[-1] @ np.append(model.tcp_offset, 1.0))[:3]
-        pts.append(tcp)
+    def table_cost_gradient(self, model, q, k=50.0, link_radius=0.05,
+                            T_guard_model=None):
+        """Numerical gradient of the table penalty in the table-guard frame."""
+        if not np.isfinite(float(k)) or k < 0.0:
+            raise ValueError("barrier gain must be finite and non-negative")
+        pts = self._points(model, q, T_guard_model)
         n = len(model.joints)
         dq = np.zeros(n)
-        # упрощённый градиент: численно через малые возмущения (стабильно и коротко)
         eps = 1e-4
         base_cost = self._cost(pts, link_radius)
-        if base_cost <= 0:
+        if base_cost <= 0.0:
             return dq
         for i in range(n):
             qp = np.asarray(q, dtype=float).copy()
             qp[i] += eps
-            Tsp = chain_transforms(model, qp)
-            ptsp = [np.zeros(3)] + [T[:3, 3] for T in Tsp]
-            ptsp.append((Tsp[-1] @ np.append(model.tcp_offset, 1.0))[:3])
+            ptsp = self._points(model, qp, T_guard_model)
             dq[i] = (self._cost(ptsp, link_radius) - base_cost) / eps
         return -k * dq
 

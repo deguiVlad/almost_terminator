@@ -295,7 +295,7 @@ ros2 run arm_ik demo_delta --ros-args -p use_sim_time:=true \
 | `waypoint_lift` | 0.25 | запас захода сверху, м |
 | `n_seeds` | 12 | число стартов IK (измеренная поза + альтернативные плечевые/локтевые конфигурации) |
 | `delta_reference` | measured | опора delta-целей (§5.2) |
-| `delta_accumulate` | false | суммирование серии дельт |
+| `delta_accumulate` | true | последовательные delta-команды накапливаются от последней цели |
 | `delta_max_lin/rot` | 0.35/1.2 | предохранители одной delta-команды, м/рад; увеличены для более широкого ручного диапазона |
 | `tcp_offset` | "" | переопределить "x,y,z" кончика поверх arms.json |
 | `model_path` | "" | arms.json (пусто — из share/config) |

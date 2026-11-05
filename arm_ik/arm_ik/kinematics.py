@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """Кинематика 7-DOF руки TienKung 2.0 Pro (URDF-кинематическая цепочка).
 
-Цепочка правой руки (зеркально для левой), базовое звено pelvis:
+Цепочка руки от waist_yaw_link (зеркально для левой):
 
-    body_yaw_joint -> shoulder_pitch_{l,r} -> shoulder_roll_{l,r}
+    shoulder_pitch_{l,r} -> shoulder_roll_{l,r}
     -> shoulder_yaw_{l,r} -> elbow_pitch_{l,r} -> elbow_yaw_{l,r}
     -> wrist_pitch_{l,r} -> wrist_roll_{l,r}
 
@@ -34,7 +34,7 @@ from arm_ik._math_compat import Rotation
 class JointSpec:
     name: str          # имя сустава как в /joint_states и URDF
     motor_id: int      # ID мотора как в /arm/cmd_pos (bodyctrl_msgs)
-    axis: np.ndarray   # ось вращения в системе ПРЕДЫДУЩЕго звена (единичный вектор)
+    axis: np.ndarray   # единичная ось вращения в joint frame после origin
     origin_xyz: np.ndarray = field(default_factory=lambda: np.zeros(3))
     origin_rpy: np.ndarray = field(default_factory=lambda: np.zeros(3))
     lower: float = -math.pi
@@ -43,11 +43,11 @@ class JointSpec:
 
 @dataclass
 class ArmModel:
-    """7-звенная цепочка одной руки от pelvis до link запястья."""
+    """7-звенная цепочка одной руки от base_frame до link запястья."""
     side: str                      # 'left' | 'right'
     joints: list                   # список JointSpec, len == 7
     tip_link: str                  # имя конечного звена (TF frame кисти)
-    base_frame: str = "pelvis"     # система координат цели (относительно корпуса)
+    base_frame: str = "waist_yaw_link"
     # Смещение точки Tool-Center-Point от системы запястья (в метрах, в рамке tip_link).
     tcp_offset: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 0.0]))
     tcp_rpy: np.ndarray = field(default_factory=lambda: np.zeros(3))
@@ -82,7 +82,7 @@ def _rot_axis(axis, q):
 
 
 def chain_transforms(model: ArmModel, q):
-    """Возвращает список 4x4 матриц T_i = T(pelvis <- joint_i_frame) после i-го сустава."""
+    """Возвращает список 4x4 матриц T_i = T(base_frame <- joint_i_frame) после i-го сустава."""
     q = np.asarray(q, dtype=float)
     if q.ndim != 1 or len(q) != len(model.joints):
         raise ValueError(f"expected {len(model.joints)} joint values, got shape {q.shape}")
@@ -117,7 +117,7 @@ def fk(model: ArmModel, q, tcp=True):
 
 
 def fk_tcp(model: ArmModel, q):
-    """Поза TCP (кончик кисти) в рамке pelvis: (position 3, quaternion wxyz 4)."""
+    """Поза TCP (кончик кисти) в рамке base_frame: (position 3, quaternion wxyz 4)."""
     Ttcp, _ = fk(model, q, tcp=True)
     pos = Ttcp[:3, 3]
     quat = Rotation.from_matrix(Ttcp[:3, :3]).as_quat()  # xyzw
@@ -483,7 +483,7 @@ def arm_from_dict(d):
             lower=float(lo), upper=float(up)))
     return ArmModel(
         side=d["side"], joints=joints, tip_link=d["tip_link"],
-        base_frame=d.get("base_frame", "pelvis"),
+        base_frame=d.get("base_frame", "waist_yaw_link"),
         tcp_offset=np.array(d.get("tcp_offset", [0.0, 0.0, 0.0]), dtype=float),
         tcp_rpy=np.array(d.get("tcp_rpy", [0.0, 0.0, 0.0]), dtype=float))
 
@@ -498,7 +498,7 @@ def make_default_arm(side: str) -> ArmModel:
     s = 1.0 if side == "left" else -1.0
     tag = "l" if side == "left" else "r"
     y_sh = 0.20 * s       # боковое смещение плеча от средней линии (м)
-    z_sh = 1.28           # высота плеча над pelvis (м)
+    z_sh = 1.28           # высота плеча над base_frame (м)
     a_up = 0.18           # длина плеча до локтя
     a_fore = 0.20         # длина предплечья до запястья
     a_wrist = 0.12        # запястье до TCP кончика пальцев ~
@@ -532,6 +532,6 @@ def make_default_arm(side: str) -> ArmModel:
         side=side,
         joints=joints,
         tip_link=f"wrist_roll_{tag}_link",
-        base_frame="pelvis",
+        base_frame="waist_yaw_link",
         tcp_offset=np.array([0.05, 0.0, 0.0]),  # кончик пальцев относительно системы запястья
     )

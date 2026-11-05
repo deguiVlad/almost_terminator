@@ -50,6 +50,7 @@
 """
 import json
 import math
+from pathlib import Path
 
 from arm_ik._math_compat import np
 import rclpy
@@ -129,6 +130,7 @@ class ArmIKNode(Node):
         # ручное declare_parameter("use_sim_time", ...) роняло ноду с
         # ParameterAlreadyDeclaredException — не добавлять.
         self.declare_parameter("base_frame", "waist_yaw_link")
+        self.declare_parameter("urdf_path", "/home/user/nssr-polygon/assets/robots/tiangong_pro/tiangong_pro_with_hands.urdf")
         self.declare_parameter("rate_hz", 50.0)
         self.declare_parameter("spd_limit", 0.8)       # жёсткий лимит документации
         self.declare_parameter("a_max", 0.4)

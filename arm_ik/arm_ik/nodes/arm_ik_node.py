@@ -699,8 +699,11 @@ class ArmIKNode(Node):
         drot = np.array([msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z])
         if fid not in ("", self.base_frame):
             try:
+                stamp = (Time.from_msg(msg.header.stamp)
+                         if msg.header.stamp.sec or msg.header.stamp.nanosec
+                         else Time())
                 tfm = self.tf_buffer.lookup_transform(
-                    self.base_frame, fid, Time(),
+                    self.base_frame, fid, stamp,
                     timeout=Duration(seconds=0.2))
                 rot = tfm.transform.rotation
                 R_frame_base = Rotation.from_quat([rot.x, rot.y, rot.z, rot.w]).as_matrix()

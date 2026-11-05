@@ -775,15 +775,26 @@ class ArmIKNode(Node):
                 ex.hold_q = q_command
                 ex.idx += 1
             elif ex.state == ArmExecutor.TRAJ:
-                ex.state = ArmExecutor.FINE  # профиль пройден -> дотягивание
+                # Основной профиль закончился. Следующий профиль будет
+                # построен fine-контуром ниже.
+                ex.state = ArmExecutor.FINE
+                ex.traj = None
+                ex.idx = 0
             else:
+                # Fine-профиль полностью исполнен: разрешаем контроллеру
+                # построить следующую коррекцию от новых измеренных углов.
+                if ex.state == ArmExecutor.FINE and ex.traj is not None:
+                    ex.traj = None
+                    ex.idx = 0
                 # Между целями и после завершения/ошибки продолжаем посылать
                 # последнюю командную позу с частотой основного control loop.
                 if self.cmd_pub is not None and ex.hold_q is not None:
                     self.cmd_pub.publish(self.make_cmd(model, ex.hold_q))
 
             if ex.state == ArmExecutor.FINE:
-                # фаза fine: замкнутый контур по /joint_states (недолёт ПД до 15 %)
+                # Замкнутый контур по /joint_states. Не перезаписываем активный
+                # fine-профиль на каждом тике: сначала отправляем все его точки,
+                # затем строим следующую коррекцию по свежим измерениям.
                 e = pose_error(fk(model, q_meas)[0], ex.T_des)
                 ex.last_err = (float(np.linalg.norm(e[:3])), float(np.linalg.norm(e[3:])))
                 if ex.last_err[0] < self.tol_pos and ex.last_err[1] < self.tol_rot:
@@ -796,7 +807,7 @@ class ArmIKNode(Node):
                     ex.state = ArmExecutor.FAILED
                     ex.traj = None
                     self.get_logger().warn(f"[{side}] fine-фаза исчерпала {ex.fine_max} циклов")
-                else:
+                elif ex.traj is None:
                     J = geometric_jacobian(model, q_meas)
                     A = J @ J.T + 0.05 ** 2 * np.eye(6)
                     dq = J.T @ np.linalg.solve(A, e)

@@ -803,6 +803,30 @@ class ArmIKNode(Node):
                 # До первой команды удерживаем фактически измеренную позу.
                 ex.hold_q = q_meas.copy()
 
+            # The arm chain is rooted at waist_yaw_link, while goals are held
+            # in pelvis. A torso-yaw change invalidates the stored model-frame
+            # target, so stop rather than silently moving the target with torso.
+            if (ex.state in (ArmExecutor.TRAJ, ArmExecutor.FINE, ArmExecutor.REACHED)
+                    and ex.T_base_model_at_plan is not None):
+                try:
+                    T_base_model_now = self._lookup_T(
+                        self.base_frame, self.kinematics_base_frame)
+                    base_error = pose_error(ex.T_base_model_at_plan, T_base_model_now)
+                    base_moved = (np.linalg.norm(base_error[:3]) > 0.01
+                                  or np.linalg.norm(base_error[3:]) > 0.01)
+                except Exception as exc:
+                    base_moved = True
+                    self.get_logger().error(
+                        f"[{side}] cannot verify pelvis-to-waist transform: {exc}")
+                if base_moved:
+                    ex.state = ArmExecutor.FAILED
+                    ex.traj = None
+                    ex.idx = 0
+                    ex.T_base_model_at_plan = None
+                    self.get_logger().error(
+                        f"[{side}] kinematic base moved relative to planning frame; "
+                        "arm goal cancelled. Hold torso still and send a new goal.")
+
             # телеметрия: текущая поза TCP (FK от энкодеров)
             ps = T_to_posemsg(fk(model, q_meas)[0])
             ps.header.frame_id = self.base_frame

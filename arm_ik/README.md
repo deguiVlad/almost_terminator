@@ -157,6 +157,7 @@ ros2 topic pub --once /arm_ik/goal_right geometry_msgs/msg/PoseStamped \
 | `tol_rot` | 0.05 рад | Допуск по ориентации |
 | `enable_table_guard` | false | Включение проверки стола |
 | `waypoint_lift` | 0.25 м | Высота обходного waypoint |
+| `tcp_offset` | пусто | Опциональный override TCP offset из URDF: `x,y,z` в метрах |
 | `delta_reference` | `measured` | Опора delta-команд |
 | `delta_accumulate` | true | Накопление delta-команд |
 | `delta_rotation_frame` | `base` | Оси rotation vector: `base` или `tcp` |

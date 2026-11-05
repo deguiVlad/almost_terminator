@@ -182,7 +182,7 @@ def clip_to_limits(q, model: ArmModel, margin=0.0):
 
 def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
            tol_rot=2e-2, damping=0.05, step_scale=1.0, weight=None,
-           barrier=None, null_gain=0.0, q_prefer=None):
+           barrier=None, null_gain=0.0, q_prefer=None, task_weights=(1.0, 1.0)):
     """Итеративная IK: Levenberg-Marquardt / Damped Least Squares.
 
     Учитывает пределы суставов (clip) и приоритетные веса сочленений.
@@ -196,18 +196,25 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
     W = np.eye(len(model.joints)) if weight is None else np.diag(weight)
     hist = []
 
+    task_weights = np.asarray(task_weights, dtype=float)
+    if task_weights.shape != (2,) or np.any(~np.isfinite(task_weights)) or np.any(task_weights <= 0.0):
+        raise ValueError("task_weights must be two positive values: (position, rotation)")
+    task_scale = np.array([task_weights[0]] * 3 + [task_weights[1]] * 3, dtype=float)
+
     def _step(cur_q, damp_cur):
-        """Один LM-шаг: возвращает (dq, J, A)."""
+        """Один взвешенный LM-шаг: приоритетная ошибка TCP."""
         J = geometric_jacobian(model, cur_q)
-        JW = J @ W
-        A = JW @ J.T + (damp_cur ** 2) * np.eye(6)
-        dq = W @ J.T @ np.linalg.solve(A, e_vec)
+        J_task = task_scale[:, None] * J
+        e_task = task_scale * e_vec
+        JW = J_task @ W
+        A = JW @ J_task.T + (damp_cur ** 2) * np.eye(6)
+        dq = W @ J_task.T @ np.linalg.solve(A, e_task)
         if barrier is not None:
             dq = dq + barrier(cur_q)
         if null_gain > 0.0 and q_prefer is not None:
             # нуль-пространственная проекция: не влияет на позу TCP
             Jp_inv = W @ J.T @ np.linalg.inv(A)
-            N = np.eye(len(model.joints)) - Jp_inv @ J
+            N = np.eye(len(model.joints)) - W @ J_task.T @ np.linalg.solve(A, J_task)
             dq = dq + null_gain * (N @ (np.asarray(q_prefer) - cur_q))
         return dq, J, A
 
@@ -215,7 +222,7 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
     for _ in range(max_iter):
         T, _ = fk(model, q)
         e_vec = pose_error(T, T_des44)
-        nrm = np.linalg.norm(e_vec)
+        nrm = np.linalg.norm(task_scale * e_vec)
         hist.append(nrm)
         if nrm < 1e-6 or (np.linalg.norm(e_vec[:3]) < tol_pos and np.linalg.norm(e_vec[3:]) < tol_rot):
             return clip_to_limits(q, model), True, hist
@@ -232,7 +239,7 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
                 if np.allclose(q_new, q, atol=1e-12):
                     break
                 Tn, _ = fk(model, q_new)
-                nn = np.linalg.norm(pose_error(Tn, T_des44))
+                nn = np.linalg.norm(task_scale * pose_error(Tn, T_des44))
                 if nn < nrm:
                     q = q_new
                     damp = max(float(damping) * 0.5, d_try * 0.7)  # успех — ослабляем демпфер
@@ -277,6 +284,7 @@ def ik_multi_seed(model: ArmModel, T_des44, seeds, n_seeds=None, jitter=None, **
     # возвращаем его сразу: альтернативные позы нужны только при неудаче.
     # Раньше успешные попытки запускались повторно при выборе best, удваивая
     # вычисления и иногда выполняя до 8 полных DLS-проходов.
+    task_weights = np.asarray(kw.get("task_weights", (1.0, 1.0)), dtype=float)
     early_exit = bool(kw.pop("early_exit", True))
     fallback_damps = kw.pop("fallback_damps", (0.10, 0.15))
     best, best_key = None, None
@@ -287,7 +295,7 @@ def ik_multi_seed(model: ArmModel, T_des44, seeds, n_seeds=None, jitter=None, **
         e = pose_error(T, T_des44)
         epos = float(np.linalg.norm(e[:3]))
         erot = float(np.linalg.norm(e[3:]))
-        key = (not ok, epos * 10.0 + erot,
+        key = (not ok, epos * float(task_weights[0]) * 10.0 + erot * float(task_weights[1]),
                float(np.linalg.norm(q - np.asarray(seeds[0]))))
         return (q, ok, epos, erot), key
 

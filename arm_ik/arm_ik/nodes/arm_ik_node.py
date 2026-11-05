@@ -50,6 +50,7 @@
 """
 import json
 import math
+import time
 from pathlib import Path
 
 from arm_ik._math_compat import np
@@ -144,6 +145,7 @@ class ArmIKNode(Node):
         self.declare_parameter("kinematics_base_frame", "waist_yaw_link")
         self.declare_parameter("urdf_path", "")
         self.declare_parameter("rate_hz", 50.0)
+        self.declare_parameter("joint_state_timeout", 0.5)
         self.declare_parameter("spd_limit", 0.8)       # жёсткий лимит документации
         self.declare_parameter("a_max", 0.4)
         self.declare_parameter("tol_pos", 0.01)        # м
@@ -215,8 +217,14 @@ class ArmIKNode(Node):
             if self.get_parameter("enable_table_guard").value else None
 
         self.rate_hz = float(self.get_parameter("rate_hz").value)
+        self.joint_state_timeout = float(self.get_parameter("joint_state_timeout").value)
         self.spd = min(float(self.get_parameter("spd_limit").value), 0.8)  # перестраховка
         self.a_max = float(self.get_parameter("a_max").value)
+        if not all(math.isfinite(v) for v in
+                   (self.rate_hz, self.joint_state_timeout, self.spd, self.a_max)):
+            raise ValueError("rate_hz, joint_state_timeout, spd_limit and a_max must be finite")
+        if min(self.rate_hz, self.joint_state_timeout, self.spd, self.a_max) <= 0.0:
+            raise ValueError("rate_hz, joint_state_timeout, spd_limit and a_max must be positive")
         self.tol_pos = float(self.get_parameter("tol_pos").value)
         self.tol_rot = float(self.get_parameter("tol_rot").value)
         self.kp = float(self.get_parameter("kp").value)
@@ -232,6 +240,8 @@ class ArmIKNode(Node):
 
         # ---------------- состояние ----------------
         self.joints = {}
+        self._last_joint_state_wall = None
+        self._last_joint_state_warning = 0.0
         self._urdf_xml = None
         self._t0 = self.get_clock().now()   # отсчёт для проверки /clock
         self.exec = {s: ArmExecutor(m) for s, m in self.models.items()}
@@ -533,7 +543,10 @@ class ArmIKNode(Node):
         values = dict(zip(msg.name, msg.position))
         if not all(np.isfinite(float(v)) for v in values.values()):
             return
+        if not values:
+            return
         self.joints.update(values)
+        self._last_joint_state_wall = time.monotonic()
         self._joint_state_received = True
 
     def q_meas(self, model):
@@ -831,6 +844,23 @@ class ArmIKNode(Node):
         if not getattr(self, "_clock_checked", False):
             self._check_sim_clock()
         if not self._tf_models_ready:
+            return
+        # Watchdog использует monotonic wall time, чтобы работать даже при
+        # остановленных/отсутствующих ROS simulation clocks.
+        last_js = self._last_joint_state_wall
+        if last_js is None or time.monotonic() - last_js > self.joint_state_timeout:
+            for ex in self.exec.values():
+                if ex.state in (ArmExecutor.TRAJ, ArmExecutor.FINE):
+                    ex.state = ArmExecutor.FAILED
+                ex.traj = None
+                ex.idx = 0
+                ex.hold_q = None
+            wall_now = time.monotonic()
+            if wall_now - self._last_joint_state_warning > 2.0:
+                self.get_logger().error(
+                    f"/joint_states stale or missing (> {self.joint_state_timeout:.2f}s); "
+                    "motor command publishing suspended")
+                self._last_joint_state_warning = wall_now
             return
         for side, model in self.models.items():
             ex = self.exec[side]

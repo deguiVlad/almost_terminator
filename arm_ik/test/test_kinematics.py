@@ -194,8 +194,7 @@ def test_delta_goal_reachable_by_ik(model):
 
 
 def test_arm_from_dict_roundtrip(model):
-    """arm_from_dict — единственный внутренний способ собрать ArmModel
-    (его использует tree_from_tf); файловых загрузчиков в пакете нет."""
+    """arm_from_dict validates dictionaries used by offline and external tooling."""
     from arm_ik.kinematics import arm_from_dict
     data = {"side": model.side, "tip_link": model.tip_link,
             "base_frame": model.base_frame,
@@ -210,7 +209,7 @@ def test_arm_from_dict_roundtrip(model):
     assert len(m.joints) == 7 and m.side == model.side
     assert m.names == model.names and m.ids == model.ids
 
- 
+
 def test_position_only_ik_reaches_target_position(model):
     from arm_ik.kinematics import fk, ik_dls
     q0 = np.array([0.1, -0.2, 0.3, -0.9, 0.2, 0.4, -0.1])

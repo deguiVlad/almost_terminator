@@ -84,7 +84,11 @@ def _rot_axis(axis, q):
 def chain_transforms(model: ArmModel, q):
     """Возвращает список 4x4 матриц T_i = T(pelvis <- joint_i_frame) после i-го сустава."""
     q = np.asarray(q, dtype=float)
-    assert len(q) == len(model.joints), f"нужно {len(model.joints)} значений, получено {len(q)}"
+    if len(q) != len(model.joints):
+        raise ValueError("expected %d joint values, received %d"
+                         % (len(model.joints), len(q)))
+    if not all(math.isfinite(float(v)) for v in q):
+        raise ValueError("joint positions must be finite")
     T = np.eye(4)
     out = []
     for js, qi in zip(model.joints, q):
@@ -479,26 +483,45 @@ _ARM_LIMITS = {
 
 
 def arm_from_dict(d):
-    """Собирает ArmModel из словаря конфигурации цепочки.
+    """Build and validate an ArmModel from a URDF-derived dictionary."""
+    side = d.get("side")
+    if side not in ("left", "right"):
+        raise ValueError("arm side must be 'left' or 'right'")
+    joint_data = d.get("joints", [])
+    if len(joint_data) != 7:
+        raise ValueError("each arm model must contain exactly 7 joints")
 
-    Единственный поставщик этого dict в рантайме — arm_ik.tree_from_tf
-    (кинематическое дерево из топиков симулятора /tf + /tf_static);
-    файловые конфиги (URDF/JSON) пакет больше не читает.
-    """
     joints = []
-    for jd in d["joints"]:
-        lo, up = jd["limits"]
+    for jd in joint_data:
+        lo, up = [float(v) for v in jd["limits"]]
+        axis = np.asarray(jd["axis"], dtype=float)
+        origin_xyz = np.asarray(jd["origin_xyz"], dtype=float)
+        origin_rpy = np.asarray(jd["origin_rpy"], dtype=float)
+        if len(axis) != 3 or len(origin_xyz) != 3 or len(origin_rpy) != 3:
+            raise ValueError("joint axis and origin vectors must be 3D")
+        if not all(math.isfinite(float(v)) for v in
+                   list(axis) + list(origin_xyz) + list(origin_rpy) + [lo, up]):
+            raise ValueError("joint geometry and limits must be finite")
+        axis_norm = float(np.linalg.norm(axis))
+        if axis_norm < 1e-12 or lo >= up:
+            raise ValueError("joint axis or limits are invalid")
+        motor_id = int(jd["motor_id"])
+        if motor_id <= 0:
+            raise ValueError("motor IDs must be positive")
         joints.append(JointSpec(
-            name=jd["name"], motor_id=int(jd["motor_id"]),
-            axis=np.array(jd["axis"], dtype=float),
-            origin_xyz=np.array(jd["origin_xyz"], dtype=float),
-            origin_rpy=np.array(jd["origin_rpy"], dtype=float),
-            lower=float(lo), upper=float(up)))
+            name=str(jd["name"]), motor_id=motor_id, axis=axis / axis_norm,
+            origin_xyz=origin_xyz, origin_rpy=origin_rpy,
+            lower=lo, upper=up))
+
+    tcp_offset = np.asarray(d.get("tcp_offset", [0.0, 0.0, 0.0]), dtype=float)
+    tcp_rpy = np.asarray(d.get("tcp_rpy", [0.0, 0.0, 0.0]), dtype=float)
+    if len(tcp_offset) != 3 or len(tcp_rpy) != 3 or not all(
+            math.isfinite(float(v)) for v in list(tcp_offset) + list(tcp_rpy)):
+        raise ValueError("TCP transform must contain finite 3D vectors")
     return ArmModel(
-        side=d["side"], joints=joints, tip_link=d["tip_link"],
-        base_frame=d.get("base_frame", "pelvis"),
-        tcp_offset=np.array(d.get("tcp_offset", [0.0, 0.0, 0.0]), dtype=float),
-        tcp_rpy=np.array(d.get("tcp_rpy", [0.0, 0.0, 0.0]), dtype=float))
+        side=side, joints=joints, tip_link=str(d["tip_link"]),
+        base_frame=d.get("base_frame", "waist_yaw_link"),
+        tcp_offset=tcp_offset, tcp_rpy=tcp_rpy)
 
 
 def make_default_arm(side: str) -> ArmModel:

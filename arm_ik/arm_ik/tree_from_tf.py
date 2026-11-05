@@ -376,17 +376,20 @@ def build_side_config_from_urdf(urdf_xml, base_frame, side):
 
 
 def build_models_from_urdf(urdf_xml, base_frame="waist_yaw_link", logger=None):
-    """Build both arm models from the supplied robot_description URDF."""
-    from arm_ik.kinematics import arm_from_dict
-    if not urdf_xml:
-        return {}
+    """Compatibility wrapper around the canonical URDF parser."""
+    from arm_ik.urdf_model import build_arm_model
     models = {}
     for side in ("left", "right"):
-        cfg = build_side_config_from_urdf(urdf_xml, base_frame, side)
-        if cfg is not None:
-            models[side] = arm_from_dict(cfg)
-            if logger is not None:
-                logger.info(f"[{side}] 7-DOF модель из URDF; TCP={cfg['tip_link']}; base={base_frame}")
+        try:
+            models[side] = build_arm_model(
+                urdf_xml, side, base_link=base_frame)
+        except ValueError as exc:
+            if "no path from" in str(exc) or "no known" in str(exc):
+                continue
+            raise
+        if logger is not None:
+            logger.info("[%s] 7-DOF model loaded from URDF; base=%s" %
+                        (side, base_frame))
     return models
 
 

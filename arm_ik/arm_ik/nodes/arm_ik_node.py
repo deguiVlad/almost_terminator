@@ -183,12 +183,12 @@ class ArmIKNode(Node):
         for m in self.models.values():
             m.base_frame = self.kinematics_base_frame
         tof = self.get_parameter("tcp_offset").value
+        self.tcp_offset_override = None
         if tof:
             v = np.asarray([float(t) for t in str(tof).split(",")], dtype=float)
             if v.shape != (3,) or not np.all(np.isfinite(v)):
                 raise ValueError("tcp_offset must contain exactly three finite numbers")
-            for m in self.models.values():
-                m.tcp_offset = v.copy()
+            self.tcp_offset_override = v.copy()
 
         self.guard = TableGuard(self.get_parameter("h_table").value,
                                 self.get_parameter("table_x0").value,
@@ -404,6 +404,8 @@ class ArmIKNode(Node):
                     if len(set(model.ids)) != 7 or any(mid <= 0 for mid in model.ids):
                         raise ValueError(f"{side} arm has invalid or duplicate motor IDs")
                     model.base_frame = self.kinematics_base_frame
+                    if self.tcp_offset_override is not None:
+                        model.tcp_offset = self.tcp_offset_override.copy()
                     all_motor_ids.extend(model.ids)
                 if len(set(all_motor_ids)) != 14:
                     raise ValueError("left/right arm motor IDs must be globally unique")

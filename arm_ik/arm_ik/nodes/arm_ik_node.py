@@ -379,9 +379,11 @@ class ArmIKNode(Node):
                 with open(self.urdf_path, "r", encoding="utf-8") as stream:
                     candidates.append(("urdf_path", stream.read()))
             except OSError as exc:
-                self.get_logger().warn(
-                    "Cannot read urdf_path=%s; trying /robot_description: %s"
-                    % (self.urdf_path, exc))
+                message = ("Cannot read urdf_path=%s; trying /robot_description: %s"
+                           % (self.urdf_path, exc))
+                if message != getattr(self, "_last_urdf_path_error", None):
+                    self.get_logger().warn(message)
+                    self._last_urdf_path_error = message
         if self._urdf_xml and all(xml != self._urdf_xml for _, xml in candidates):
             candidates.append(("/robot_description", self._urdf_xml))
 
@@ -415,6 +417,7 @@ class ArmIKNode(Node):
                 self._models_ready = True
                 self._urdf_wait_warned = False
                 self._last_urdf_error = None
+                self._last_urdf_path_error = None
                 self.get_logger().info(
                     "IK models loaded from %s (base=%s): %s" % (
                         source, self.kinematics_base_frame,

@@ -46,6 +46,8 @@ class TableGuard:
 
     def collides_with_table(self, model, q, link_radius=0.05):
         """Проверяет все звенья руки (с аппроксимацией «толщиной» link_radius)."""
+        if not math.isfinite(float(link_radius)) or link_radius < 0.0:
+            raise ValueError("link_radius must be finite and non-negative")
         Ts = chain_transforms(model, q)
         pts = [np.zeros(3)] + [T[:3, 3] for T in Ts]
         tcp = (Ts[-1] @ np.append(model.tcp_offset, 1.0))[:3]
@@ -69,6 +71,10 @@ class TableGuard:
         Cost = Σ_i max(0, depth_i)^2 * k ; dq_step = -J_coll^T * dC/dp_i.
         Возвращает dq_correction (7,) — добавить к шагу IK.
         """
+        if not math.isfinite(float(link_radius)) or link_radius < 0.0:
+            raise ValueError("link_radius must be finite and non-negative")
+        if not math.isfinite(float(k)) or k < 0.0:
+            raise ValueError("barrier gain must be finite and non-negative")
         Ts = chain_transforms(model, q)
         pts = [np.zeros(3)] + [T[:3, 3] for T in Ts]
         tcp = (Ts[-1] @ np.append(model.tcp_offset, 1.0))[:3]
@@ -110,8 +116,7 @@ class TableGuard:
         return self.penetration(np.array(p) - np.array([0.0, 0.0, 0.05])) > 0.0
 
     def clamp_goal(self, T44):
-        """Возвращает копию T44 с z цели, поднятым над столом+запас."""
-        import copy as _copy
+        """Возвращает копию T44 с z цели, поднятым над столом+запас+радиус звена."""
         T = np.array(T44, dtype=float).copy()
         p = self.clamp_target_above_table([float(v) for v in T[:3, 3]])
         T[:3, 3] = p
@@ -120,6 +125,8 @@ class TableGuard:
     def clamp_target_above_table(self, pos):
         """Жёсткая страховка цели: TCP никогда не запрашивается ниже стола+запас."""
         p = np.asarray(pos, dtype=float).copy()
+        if len(p) != 3 or not all(math.isfinite(float(v)) for v in p):
+            raise ValueError("target position must contain three finite values")
         if self.inside_xy(p):
             p[2] = max(p[2], self.h + self.margin + 0.05)
         return p

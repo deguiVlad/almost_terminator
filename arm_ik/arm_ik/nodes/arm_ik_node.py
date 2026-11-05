@@ -141,6 +141,7 @@ class ArmIKNode(Node):
         self.declare_parameter("tol_pos", 0.01)        # м
         self.declare_parameter("tol_rot", 0.05)        # рад
         self.declare_parameter("kp", 0.6)              # коррекция недолёта ПД
+        self.declare_parameter("ik_rotation_weight", 0.25) # приоритет позиции TCP над ориентацией
         self.declare_parameter("fine_max_cycles", 300) # страховка от бесконечной fine
         self.declare_parameter("h_table", 0.9)         # высота стола над pelvis, м
         self.declare_parameter("table_x0", 0.35)
@@ -159,7 +160,7 @@ class ArmIKNode(Node):
         self.declare_parameter("tf_refresh_period", 5.0) # с периодической пересборки цепочки из TF
         # --- параметры delta-целей (TwistStamped на /arm_ik/delta_{left,right}) ---
         self.declare_parameter("delta_reference", "measured")  # measured | last_goal
-        self.declare_parameter("delta_accumulate", False)      # суммировать ли дельты между собой
+        self.declare_parameter("delta_accumulate", True)       # потоковые delta-команды накапливаются от последней цели
         self.declare_parameter("delta_max_lin", 0.35)          # предохранитель на одну команду, м
         self.declare_parameter("delta_max_rot", 1.2)           # предохранитель на одну команду, рад
         self.declare_parameter("delta_rotation_frame", "base") # base | tcp
@@ -211,6 +212,7 @@ class ArmIKNode(Node):
         self.tol_pos = float(self.get_parameter("tol_pos").value)
         self.tol_rot = float(self.get_parameter("tol_rot").value)
         self.kp = float(self.get_parameter("kp").value)
+        self.ik_rotation_weight = max(0.05, float(self.get_parameter("ik_rotation_weight").value))
         self.fine_max = int(self.get_parameter("fine_max_cycles").value)
         self.lift = float(self.get_parameter("waypoint_lift").value)
         self.n_seeds = int(self.get_parameter("n_seeds").value)
@@ -636,27 +638,8 @@ class ArmIKNode(Node):
                      if position_only else [True] * 6)
         q_sol, ok, epos, erot = ik_multi_seed(
             model, T_des_model, seeds, max_iter=350, tol_pos=self.tol_pos * 0.5,
-            tol_rot=self.tol_rot * 0.5, barrier=barrier, task_mask=task_mask)
-
-        relaxed_orientation = False
-        if not ok and allow_position_fallback and not position_only:
-            q_pos, ok_pos, ep_pos, er_pos = ik_multi_seed(
-                model, T_des_model, seeds, max_iter=400,
-                tol_pos=self.tol_pos * 0.5, tol_rot=self.tol_rot * 0.5,
-                barrier=barrier,
-                task_mask=[True, True, True, False, False, False])
-            if ok_pos:
-                q_sol, ok, epos, erot = q_pos, True, ep_pos, er_pos
-                T_des_model[:3, :3] = fk(model, q_sol)[0][:3, :3]
-                ex.T_des = T_des_model
-                relaxed_orientation = True
-                self.get_logger().warn(
-                    f"[{side}] position reachable; requested orientation relaxed "
-                    "to the reachable wrist orientation")
-
-        if ok and position_only and not relaxed_orientation:
-            T_des_model[:3, :3] = fk(model, q_sol)[0][:3, :3]
-            ex.T_des = T_des_model
+            tol_rot=self.tol_rot * 0.5, barrier=barrier,
+            task_weights=(1.0, self.ik_rotation_weight))
 
         dt = 1.0 / self.rate_hz
         if ok and self.guard is not None:
@@ -677,10 +660,12 @@ class ArmIKNode(Node):
         if self.guard is not None:
             wp = T_des_model.copy()
             # waypoint поднимаем в системе IK; стол уже проверен в planning frame
-            q_wp, ok1, _, _ = ik_multi_seed(model, wp, seeds, max_iter=200,
-                                            barrier=barrier)
-            q_fin, ok2, _, _ = ik_multi_seed(model, T_des_model, [q_wp] + seeds, max_iter=200,
-                                             barrier=barrier)
+            q_wp, ok1, _, _ = ik_multi_seed(model, wp, seeds, max_iter=250,
+                                            barrier=barrier,
+                                            task_weights=(1.0, self.ik_rotation_weight))
+            q_fin, ok2, _, _ = ik_multi_seed(model, T_des_model, [q_wp] + seeds, max_iter=250,
+                                             barrier=barrier,
+                                             task_weights=(1.0, self.ik_rotation_weight))
             if ok1 and ok2:
                 t1 = joint_space_profile(q_now, q_wp, self.spd, self.a_max, dt)
                 t2 = joint_space_profile(q_wp, q_fin, self.spd, self.a_max, dt)
@@ -719,7 +704,7 @@ class ArmIKNode(Node):
     def on_delta(self, side, msg: TwistStamped):
         """Относительная цель: смещение TCP на 6-мерный вектор (TwistStamped).
 
-        linear  = dxyz (м), angular = ось*угол (рад), оба в системе base_frame.
+        linear = dxyz (м), angular = rotation-vector (ось*угол, рад), не угловая скорость; оба в base_frame.
         Опорная поза (параметр delta_reference):
           'measured'  — текущая ИЗМЕРЕННАЯ поза TCP (FK от энкодеров);
                         повторная публикация той же дельты = «ещё раз на столько же»
@@ -771,15 +756,8 @@ class ArmIKNode(Node):
         if nl < 1e-9 and nr < 1e-9:
             return  # нулевая дельта — ничего делать не нужно
 
-        # Translation is expressed in base axes. Rotation can use base
-        # axes (pre-multiply) or the TCP's own axes (post-multiply).
+        # angular задаёт конечный поворот за команду (rotation vector), а не скорость.
         T_des = delta_to_T(T_ref, dpos, drot, base_ref=True)
-        if nr > 1e-9 and self.delta_rotation_frame == "tcp":
-            T_des[:3, :3] = T_ref[:3, :3] @ Rotation.from_rotvec(drot).as_matrix()
-        elif self.delta_rotation_frame not in ("base", "tcp"):
-            self.get_logger().error(
-                f"delta_rotation_frame must be 'base' or 'tcp', got {self.delta_rotation_frame!r}")
-            return
         self.get_logger().info(
             f"[{side}] delta-цель: dp=({dpos[0]:+.3f},{dpos[1]:+.3f},{dpos[2]:+.3f}) м, "
             f"dr=({drot[0]:+.3f},{drot[1]:+.3f},{drot[2]:+.3f}) рад "

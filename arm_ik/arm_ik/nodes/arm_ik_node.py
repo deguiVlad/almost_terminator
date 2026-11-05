@@ -126,7 +126,7 @@ class ArmIKNode(Node):
         # use_sim_time объявляется автоматически базовым классом Node (ROS 2 Humble);
         # ручное declare_parameter("use_sim_time", ...) роняло ноду с
         # ParameterAlreadyDeclaredException — не добавлять.
-        self.declare_parameter("base_frame", "pelvis")
+        self.declare_parameter("base_frame", "waist_yaw_link")
         self.declare_parameter("rate_hz", 50.0)
         self.declare_parameter("spd_limit", 0.8)       # жёсткий лимит документации
         self.declare_parameter("a_max", 0.4)
@@ -210,6 +210,7 @@ class ArmIKNode(Node):
 
         # ---------------- состояние ----------------
         self.joints = {}
+        self._urdf_xml = ""
         self._t0 = self.get_clock().now()   # отсчёт для проверки /clock
         self.exec = {s: ArmExecutor(m) for s, m in self.models.items()}
         self._tf_last_try = None      # когда последний раз просили дерево TF
@@ -327,6 +328,7 @@ class ArmIKNode(Node):
         """robot_description (URDF-XML) — источник точных лимитов суставов."""
         try:
             self._urdf_xml = str(msg.data)
+            self.try_build_tree_from_tf(force=True)
         except Exception:
             pass
 
@@ -367,7 +369,7 @@ class ArmIKNode(Node):
         self._tf_last_try = now
 
         static_msgs, dyn_msgs = self._tf_snapshot()
-        if not static_msgs and not dyn_msgs:
+        if not static_msgs and not dyn_msgs and not self._urdf_xml:
             waited = (now - self._t0).nanoseconds / 1e9
             if not getattr(self, "_tf_warned", False):
                 self.get_logger().warn(
@@ -502,6 +504,9 @@ class ArmIKNode(Node):
     # ------------------------------------------------------------ goals
     def set_goal(self, side, T_des):
         """Общий конвейер: IK -> траектория (с защитой стола) -> исполнение."""
+        if not self._tf_models_ready:
+            self.get_logger().warn(f"[{side}] IK rejected: URDF model is not ready")
+            return False
         ex = self.exec[side]
         model = self.models[side]
         if self.guard is not None:
@@ -560,6 +565,9 @@ class ArmIKNode(Node):
 
     def on_goal(self, side, goal: PoseStamped):
         """Абсолютная шестимерная цель TCP (PoseStamped)."""
+        if not self._tf_models_ready:
+            self.get_logger().warn(f"[{side}] goal rejected: waiting for /robot_description")
+            return
         try:
             T_des = self.to_base_T(goal)
         except Exception as e:  # TF ещё не доступен
@@ -641,12 +649,14 @@ class ArmIKNode(Node):
         self.try_build_tree_from_tf()
         if not getattr(self, "_clock_checked", False):
             self._check_sim_clock()
+        if not self._tf_models_ready:
+            return
         for side, model in self.models.items():
             ex = self.exec[side]
             q_meas = self.q_meas(model)
 
             # телеметрия: текущая поза TCP (FK от энкодеров)
-            ps = T_to_posemsg(fk(model, q_meas)[0] @ _tmat(model.tcp_offset, [0, 0, 0]))
+            ps = T_to_posemsg(fk(model, q_meas)[0])
             ps.header.frame_id = self.base_frame
             ps.header.stamp = now
             self.pose_pubs[side].publish(ps)

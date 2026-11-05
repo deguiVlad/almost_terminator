@@ -118,6 +118,9 @@ class ArmExecutor:
         self.last_err = (float("nan"), float("nan"))
         # опорная поза для delta-целей (используется при delta_reference=last_goal):
         self.last_T_des = None
+        # Последняя отправленная позиция суставов; повторно публикуется
+        # в idle/reached/failed, чтобы контроллер продолжал удерживать позу.
+        self.hold_q = None
 
 
 class ArmIKNode(Node):
@@ -220,6 +223,9 @@ class ArmIKNode(Node):
         self._urdf_xml = None
         self._t0 = self.get_clock().now()   # отсчёт для проверки /clock
         self.exec = {s: ArmExecutor(m) for s, m in self.models.items()}
+        # Совместимость с вариантами обработчика, читающими fine_max из executor.
+        for ex in self.exec.values():
+            ex.fine_max = self.fine_max
         self._tf_last_try = None      # когда последний раз просили дерево TF
 
         # ---------------- ROS интерфейсы ----------------
@@ -751,6 +757,9 @@ class ArmIKNode(Node):
             if not all(name in self.joints for name in model.names):
                 continue
             q_meas = self.q_meas(model)
+            if ex.hold_q is None:
+                # До первой команды удерживаем фактически измеренную позу.
+                ex.hold_q = q_meas.copy()
 
             # телеметрия: текущая поза TCP (FK от энкодеров)
             ps = T_to_posemsg(fk(model, q_meas)[0])
@@ -759,12 +768,19 @@ class ArmIKNode(Node):
             self.pose_pubs[side].publish(ps)
 
             if ex.traj is not None and ex.idx < len(ex.traj):
-                # фаза траектории: открытая петля по заранее просчитанному профилю
+                # Сохраняем последнюю реально отправленную точку траектории.
+                q_command = np.asarray(ex.traj[ex.idx], dtype=float).copy()
                 if self.cmd_pub is not None:
-                    self.cmd_pub.publish(self.make_cmd(model, ex.traj[ex.idx]))
+                    self.cmd_pub.publish(self.make_cmd(model, q_command))
+                ex.hold_q = q_command
                 ex.idx += 1
             elif ex.state == ArmExecutor.TRAJ:
                 ex.state = ArmExecutor.FINE  # профиль пройден -> дотягивание
+            else:
+                # Между целями и после завершения/ошибки продолжаем посылать
+                # последнюю командную позу с частотой основного control loop.
+                if self.cmd_pub is not None and ex.hold_q is not None:
+                    self.cmd_pub.publish(self.make_cmd(model, ex.hold_q))
 
             if ex.state == ArmExecutor.FINE:
                 # фаза fine: замкнутый контур по /joint_states (недолёт ПД до 15 %)

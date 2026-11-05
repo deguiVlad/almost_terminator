@@ -190,13 +190,21 @@ class _Array(list):
         return self._cmp(o, lambda a, b: a == b)
 
     def max(self):
-        return max(float(x) for x in self)
+        return max(float(v) for v in _flatten(self))
 
     def min(self):
-        return min(float(x) for x in self)
+        return min(float(v) for v in _flatten(self))
 
     def sum(self):
-        return sum(float(x) for x in self)
+        return sum(float(v) for v in _flatten(self))
+
+
+def _flatten(values):
+    for value in values:
+        if isinstance(value, (list, tuple, _Array)):
+            yield from _flatten(value)
+        else:
+            yield value
 
 
 def _is2d(m):
@@ -340,6 +348,8 @@ class _NP:
 
     @staticmethod
     def abs(x):
+        if _is2d(x):
+            return _Array([_Array([abs(float(v)) for v in row]) for row in x])
         if isinstance(x, (list, tuple, _Array)):
             return _Array([abs(float(v)) for v in x])
         return abs(float(x))
@@ -451,8 +461,16 @@ class _NP:
 
     @staticmethod
     def tile(vec, reps):
-        n, times = reps
-        return _Array([_Array([float(x) for x in vec]) for _ in range(times)])
+        if isinstance(reps, int):
+            return _Array([float(x) for _ in range(reps) for x in vec])
+        reps = tuple(reps)
+        if len(reps) == 2 and not _is2d(vec):
+            rows, cols = int(reps[0]), int(reps[1])
+            row = [float(x) for x in vec] * cols
+            return _Array([_Array(row) for _ in range(rows)])
+        if len(reps) == 1:
+            return _Array([float(x) for _ in range(int(reps[0])) for x in vec])
+        raise NotImplementedError("pure-python tile supports 1D vector and (rows, cols)")
 
     @staticmethod
     def diff(m, axis=0):

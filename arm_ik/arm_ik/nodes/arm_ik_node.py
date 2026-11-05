@@ -129,7 +129,7 @@ class ArmIKNode(Node):
         # use_sim_time объявляется автоматически базовым классом Node (ROS 2 Humble);
         # ручное declare_parameter("use_sim_time", ...) роняло ноду с
         # ParameterAlreadyDeclaredException — не добавлять.
-        self.declare_parameter("base_frame", "waist_yaw_link")
+        self.declare_parameter("base_frame", "pelvis")
         self.declare_parameter("kinematics_base_frame", "waist_yaw_link")
         self.declare_parameter("urdf_path", "")
         self.declare_parameter("rate_hz", 50.0)
@@ -196,9 +196,6 @@ class ArmIKNode(Node):
                                 self.get_parameter("table_y_half").value,
                                 self.get_parameter("table_margin").value) \
             if self.get_parameter("enable_table_guard").value else None
-        if self.guard is not None and self.base_frame != self.kinematics_base_frame:
-            raise ValueError(
-                "table guard currently requires base_frame == kinematics_base_frame")
 
         self.rate_hz = float(self.get_parameter("rate_hz").value)
         self.joint_state_timeout = float(self.get_parameter("joint_state_timeout").value)
@@ -598,9 +595,11 @@ class ArmIKNode(Node):
             return False
         ex.T_des = T_des_model
 
+        T_base_model = np.linalg.inv(T_model_base)
         barrier = None
         if self.guard is not None:
-            barrier = lambda q: self.guard.table_cost_gradient(model, q, k=30.0)
+            barrier = lambda q: self.guard.table_cost_gradient(
+                model, q, k=30.0, T_guard_model=T_base_model)
 
         # 1) IK: multi-seed DLS с барьером стола
         seeds = self.seed_poses(model, q_now)
@@ -614,7 +613,8 @@ class ArmIKNode(Node):
         dt = 1.0 / self.rate_hz
         if ok and self.guard is not None:
             traj = joint_space_profile(q_now, q_sol, self.spd, self.a_max, dt)
-            bad = any(self.guard.collides_with_table(model, qq) for qq in traj)
+            bad = any(self.guard.collides_with_table(
+                model, qq, T_guard_model=T_base_model) for qq in traj)
         else:
             bad = False
 
@@ -631,7 +631,9 @@ class ArmIKNode(Node):
             # Настоящий waypoint: сначала поднять TCP, затем идти к финальной
             # цели. Оба суставных сегмента проверяются сэмплированием звеньев.
             wp = T_des_model.copy()
-            wp[2, 3] += self.lift
+            wp_base = T_base_model @ wp
+            wp_base[2, 3] += self.lift
+            wp = T_model_base @ wp_base
             q_wp, ok1, _, _ = ik_multi_seed(
                 model, wp, seeds, max_iter=300, barrier=barrier,
                 task_weights=(1.0, self.ik_rotation_weight), task_mask=task_mask)
@@ -644,7 +646,8 @@ class ArmIKNode(Node):
                     t1 = joint_space_profile(q_now, q_wp, self.spd, self.a_max, dt)
                     t2 = joint_space_profile(q_wp, q_fin, self.spd, self.a_max, dt)
                     route = np.vstack([t1[:-1], t2])
-                    if not any(self.guard.collides_with_table(model, qq) for qq in route):
+                    if not any(self.guard.collides_with_table(
+                            model, qq, T_guard_model=T_base_model) for qq in route):
                         ex.traj = route
                         ex.idx, ex.state, ex.fine_cycles = 0, ArmExecutor.TRAJ, 0
                         ex.last_T_des = np.linalg.inv(T_model_base) @ T_des_model

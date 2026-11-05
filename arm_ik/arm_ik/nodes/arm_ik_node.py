@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """ROS 2 узел обратной кинематики обеих рук TienKung 2.0 Pro (7 DOF на руку).
 
-Дерево звеньев для IK строится из топиков симулятора /tf и /tf_static
-(модуль arm_ik.tree_from_tf); файлы URDF/JSON-конфиги не читаются. Время —
+Кинематическая модель и limits строятся из URDF; TF2 используется только
+для преобразования целевых поз между рамками. Время —
 из /clock (запускается с use_sim_time, проверка источника времени выполняется
 на старте ноды).
 
@@ -33,7 +33,7 @@
                               idle | traj | fine | reached | failed + ошибки.
 
 Конвейер исполнения цели (подробно — README пакета):
-  1. TF-перенос цели в pelvis, клампинг выше стола (TableGuard);
+  1. TF-перенос цели в base_frame, клампинг выше стола (TableGuard);
   2. IK: DLS из текущей измеренной позы + сиды-альтернативы (multi-seed),
      мягкий барьер от стола внутри шага IK;
   3. траектория: trapezoidal профиль |dq/dt| <= 0.8 рад/с, валидация каждой
@@ -152,12 +152,7 @@ class ArmIKNode(Node):
         self.declare_parameter("waypoint_lift", 0.25)  # заход сверху, м (FOCUS_TRACKING §Шаг2)
         self.declare_parameter("n_seeds", 12)          # расширенный набор стартов IK
         self.declare_parameter("tcp_offset", "")         # "x,y,z" поверх TF-цепочки (переопределить кончик)
-        # --- источник дерева звеньев для IK ---
-        # Единственный источник — топики симулятора /tf и /tf_static
-        # (модуль arm_ik.tree_from_tf); файловые режимы (URDF/JSON-конфиги)
-        # из пакета вычищены полностью.
-        self.declare_parameter("tf_wait_timeout", 10.0) # с ожидания первого полного дерева TF
-        self.declare_parameter("tf_refresh_period", 5.0) # с периодической пересборки цепочки из TF
+        # Кинематическая модель и пределы суставов берутся только из URDF.
         # --- параметры delta-целей (TwistStamped на /arm_ik/delta_{left,right}) ---
         self.declare_parameter("delta_reference", "measured")  # measured | last_goal
         self.declare_parameter("delta_accumulate", True)       # потоковые delta-команды накапливаются от последней цели
@@ -238,7 +233,6 @@ class ArmIKNode(Node):
         # Совместимость с вариантами обработчика, читающими fine_max из executor.
         for ex in self.exec.values():
             ex.fine_max = self.fine_max
-        self._tf_last_try = None      # когда последний раз просили дерево TF
 
         # ---------------- ROS интерфейсы ----------------
         self.cmd_pub = None
@@ -280,7 +274,7 @@ class ArmIKNode(Node):
         except Exception:
             pass
         # первая попытка построить дерево — сразу, далее по таймеру step
-        self.try_build_tree_from_tf()
+        self.try_build_urdf_model()
 
         self.timer = self.create_timer(1.0 / self.rate_hz, self.step)
 
@@ -305,10 +299,9 @@ class ArmIKNode(Node):
                 float(self.get_parameter("demo_period").value), self.demo_tick)
 
         self.get_logger().info(
-            f"arm_ik_node ready | tips={[m.tip_link for m in self.models.values()]} | "
-            f"tree=/tf+tf_static{' (ждём дерево)' if not self._tf_models_ready else ' (получено)'} | "
+            f"arm_ik_node ready | waiting_for_urdf={not self._tf_models_ready} | "
             f"guard={'ON h=%.2f' % self.guard.h if self.guard else 'OFF'} | "
-            "service=disabled (ament_python package does not generate custom srv)")
+            "custom service=disabled")
 
     # ------------------------------------------------------------ дерево из TF
     def _check_sim_clock(self):
@@ -349,147 +342,71 @@ class ArmIKNode(Node):
         """Полный URDF из robot_description — источник кинематики и лимитов."""
         try:
             self._urdf_xml = str(msg.data)
-            self.try_build_tree_from_tf(force=True)
+            self.try_build_urdf_model(force=True)
         except Exception:
             pass
 
-    def _tf_snapshot(self):
-        """([static TFMessage], [dynamic TFMessage]) из буфера TF2.
+    def try_build_urdf_model(self, force=False):
+        """Load exact arm chains and joint limits from URDF.
 
-        Берём и static-рёбра (/tf_static — постоянные origin'ы), и динамические
-        (/tf — активные суставные соединения симулятора).
-        """
-        static_msgs, dyn_msgs = [], []
-        try:
-            st, dy = self.tf_buffer.all_as_listofmessages()
-            static_msgs, dyn_msgs = list(st), list(dy)
-        except Exception:
-            try:  # старые версии tf2_ros: только all_frames_as_string/lookup
-                st, dy = self.tf_buffer.all_as_listofmessages() \
-                    if hasattr(self.tf_buffer, "all_as_listofmessages") else ([], [])
-                static_msgs, dyn_msgs = list(st), list(dy)
-            except Exception as e:
-                self.get_logger().debug(f"tf snapshot недоступен: {e}")
-        return static_msgs, dyn_msgs
-
-    def try_build_tree_from_tf(self, force=False):
-        """Пересобрать кинематические модели обеих рук из /tf + /tf_static.
-
-        Вызывается при старте и периодически (tf_refresh_period) из step():
-        пока дерево не получено, нода живёт на шаблонной модели; как только
-        симулятор опубликовал полные /tf+/tf_static — цепочка звеньев
-        пересобирается из TF и executor'ы переключаются на новые модели.
+        TF alone is deliberately not accepted as a kinematic source: it cannot
+        recover the original joint axes, types or hard position limits.
         """
         if getattr(self, "_urdf_models_ready", False):
             return True
-        # URDF-файл или /robot_description — авторитетный источник геометрии.
+
         urdf_xml = self._urdf_xml
         if self.urdf_path:
             try:
                 with open(self.urdf_path, "r", encoding="utf-8") as stream:
                     urdf_xml = stream.read()
-            except OSError as e:
-                self.get_logger().warning(
-                    "URDF-файл недоступен (%s); пробую transient-local /robot_description: %s" %
-                    (self.urdf_path, e))
-                urdf_xml = self._urdf_xml
-        if urdf_xml:
-            try:
-                from arm_ik.urdf_model import build_models_from_urdf
-                models = build_models_from_urdf(
-                    urdf_xml, base_link=self.kinematics_base_frame)
-                self.models = models
-                for side, model in models.items():
-                    model.base_frame = self.kinematics_base_frame
-                    self.exec[side].model = model
-                self._urdf_models_ready = True
-                self._tf_models_ready = True
-                self.get_logger().info(
-                    "IK-модели собраны из URDF: base=%s; %s" %
-                    (self.kinematics_base_frame, ", ".join(
-                        "%s: %s -> %s, motors=%s" %
-                        (s, m.names[0], m.tip_link, m.ids)
-                        for s, m in models.items())))
-                return True
-            except Exception as e:
-                self.get_logger().error("ошибка построения IK из URDF: %s" % e)
-                return False
+            except OSError as exc:
+                if urdf_xml is None:
+                    key = str(exc)
+                    if getattr(self, "_last_urdf_error", None) != key:
+                        self.get_logger().warning(
+                            f"URDF file unavailable ({self.urdf_path}); waiting for "
+                            f"/robot_description: {exc}")
+                        self._last_urdf_error = key
 
-        # TF содержит только текущие трансформы, но не раскрывает URDF joint axis,
-        # joint type и position limits. Строить исполнительную IK-модель только
-        # по TF небезопасно: при отсутствии URDF остаёмся в ожидании.
         if not urdf_xml:
             if not getattr(self, "_urdf_missing_warned", False):
                 self.get_logger().warning(
-                    "URDF ещё не получен: задайте urdf_path или запустите "
-                    "robot_state_publisher с публикацией /robot_description. "
-                    "TF-only IK отключён, так как из TF нельзя восстановить оси и limits.")
+                    "URDF is not available. Set urdf_path or publish transient-local "
+                    "/robot_description (std_msgs/msg/String). IK remains disabled.")
                 self._urdf_missing_warned = True
             return False
 
-        now = self.get_clock().now()
-        if not force:
-            last = self._tf_last_try
-            period = (0.0 if not getattr(self, "_tf_models_ready", False)
-                      else self.tf_refresh)
-            if last is not None and (now - last).nanoseconds / 1e9 < period:
-                return False
-        self._tf_last_try = now
-
-        static_msgs, dyn_msgs = self._tf_snapshot()
-        if not static_msgs and not dyn_msgs and not self._urdf_xml:
-            waited = (now - self._t0).nanoseconds / 1e9
-            if not getattr(self, "_tf_warned", False):
-                self.get_logger().warn(
-                    "дерево звеньев ещё не получено из /tf, /tf_static — "
-                    "работаю на шаблонной модели (проверьте robot_state_publisher "
-                    "и use_sim_time)")
-                self._tf_warned = True
-            if waited > self.tf_wait_timeout and \
-                    not getattr(self, "_tf_timeout_warned", False):
-                self._tf_timeout_warned = True
-                self.get_logger().error(
-                    f"за {self.tf_wait_timeout:.0f} с дерево из /tf+/tf_static не "
-                    "появилось; проверьте, что симулятор/robot_state_publisher "
-                    "запущены и публикуют TF (единственный источник дерева звеньев)")
-            return False
-
-        from arm_ik.tree_from_tf import build_models_from_tf
-        tcp_ov = None
-        tof = self.get_parameter("tcp_offset").value
-        if tof:
-            v = [float(t) for t in str(tof).split(",")]
-            tcp_ov = {"left": v, "right": v}
         try:
-            models = build_models_from_tf(
-                static_msgs, dyn_msgs, sorted(self.joints), self.base_frame,
-                urdf_xml=self._urdf_xml, tcp_offsets=tcp_ov,
-                logger=self.get_logger())
-        except Exception as e:
-            self.get_logger().error(f"построение дерева IK из /tf failed: {e}")
-            return False
-        if len(models) < 2:
-            if not getattr(self, "_tf_models_ready", False):
-                self.get_logger().warn(
-                    f"из /tf собраны не обе руки ({sorted(models)}) — жду полное дерево")
-            return False
-        changed = any(models[s].names != self.models[s].names
-                      or models[s].tip_link != self.models[s].tip_link
-                      for s in ("left", "right")) \
-            or not getattr(self, "_tf_models_ready", False)
-        self.models = models
-        for m in self.models.values():
-            m.base_frame = self.kinematics_base_frame
-        if changed:
-            for s, ex in self.exec.items():
-                ex.model = self.models[s]
+            from arm_ik.urdf_model import build_models_from_urdf
+            models = build_models_from_urdf(
+                urdf_xml, base_link=self.kinematics_base_frame)
+            if set(models) != {"left", "right"}:
+                raise ValueError("URDF parser did not produce both arm models")
+            for side, model in models.items():
+                if len(model.joints) != 7:
+                    raise ValueError(f"{side} arm must have exactly 7 movable joints")
+                if len(set(model.ids)) != 7 or any(mid <= 0 for mid in model.ids):
+                    raise ValueError(f"{side} arm has invalid or duplicate motor IDs")
+                model.base_frame = self.kinematics_base_frame
+
+            self.models = models
+            for side, model in models.items():
+                self.exec[side].model = model
+            self._urdf_models_ready = True
             self._tf_models_ready = True
-            self._tf_warned = False
             self.get_logger().info(
-                "кинематическая модель IK построена (приоритет URDF, TF только для frame transforms): " +
-                ", ".join(f"{s}: {m.names[0]}..{m.names[-1]} -> {m.tip_link}"
-                          for s, m in self.models.items()))
-        return True
+                "Exact IK models loaded from URDF: " + "; ".join(
+                    f"{side}: {model.names[0]}..{model.names[-1]} -> {model.tip_link}, "
+                    f"motor_ids={model.ids}"
+                    for side, model in models.items()))
+            return True
+        except Exception as exc:
+            key = str(exc)
+            if getattr(self, "_last_urdf_error", None) != key:
+                self.get_logger().error(f"Failed to build IK models from URDF: {exc}")
+                self._last_urdf_error = key
+            return False
 
     def _demo_sides(self):
         side = str(self.get_parameter("demo_side").value)
@@ -810,9 +727,8 @@ class ArmIKNode(Node):
     # ------------------------------------------------------------ control loop
     def step(self):
         now = self.get_clock().now().to_msg()
-        # периодическая пересборка дерева звеньев из /tf + /tf_static
-        # (сначала — часто, пока дерево не получено; затем раз в tf_refresh)
-        self.try_build_tree_from_tf()
+        # Попытка загрузить точную кинематику из файла или /robot_description.
+        self.try_build_urdf_model()
         if not getattr(self, "_clock_checked", False):
             self._check_sim_clock()
         if not self._tf_models_ready:

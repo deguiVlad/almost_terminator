@@ -15,10 +15,14 @@ def _urdf():
     xml = ['<robot name="test">']
     xml += [f'<link name="{name}"/>' for name in links]
     axes = ['0 1 0', '1 0 0', '0 0 1', '0 1 0', '0 0 1', '0 1 0', '1 0 0']
-    for i, axis in enumerate(axes, 1):
+    names = ['shoulder_pitch_l_joint', 'shoulder_roll_l_joint',
+             'shoulder_yaw_l_joint', 'elbow_pitch_l_joint',
+             'elbow_yaw_l_joint', 'wrist_pitch_l_joint', 'wrist_roll_l_joint']
+    for i, (name, axis) in enumerate(zip(names, axes), 1):
+        parent = 'waist_yaw_link' if i == 1 else 'link_' + str(i - 1)
         xml.append(
-            f'<joint name="{"shoulder_pitch_l_joint" if i == 1 else ["shoulder_roll_l_joint","shoulder_yaw_l_joint","elbow_pitch_l_joint","elbow_yaw_l_joint","wrist_pitch_l_joint","wrist_roll_l_joint"][i-2] if i < 8 else "x"}" type="revolute">'
-            f'<parent link="{"waist_yaw_link" if i == 1 else f"link_{i-1}"}"/>'
+            f'<joint name="{name}" type="revolute">'
+            f'<parent link="{parent}"/>'
             f'<child link="link_{i}"/><origin xyz="0 0 -0.1" rpy="0 0 0"/>'
             f'<axis xyz="{axis}"/><limit lower="-1.2" upper="1.1" effort="10" velocity="2"/></joint>')
     xml.append('<joint name="tcp_fixed" type="fixed"><parent link="link_7"/><child link="tcp_link"/><origin xyz="0 0 -0.08" rpy="0 0 0"/></joint>')

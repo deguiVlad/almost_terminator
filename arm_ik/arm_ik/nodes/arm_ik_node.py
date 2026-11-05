@@ -761,7 +761,7 @@ class ArmIKNode(Node):
         self.get_logger().info(
             f"[{side}] delta-цель: dp=({dpos[0]:+.3f},{dpos[1]:+.3f},{dpos[2]:+.3f}) м, "
             f"dr=({drot[0]:+.3f},{drot[1]:+.3f},{drot[2]:+.3f}) рад "
-            f"[ref={'last_goal' if use_last else 'measured'}, rot_frame={self.delta_rotation_frame}]")
+            f"[ref={'last_goal' if use_last else 'measured'}]")
         self.set_goal(side, T_des, position_only=(nl > 1e-9 and nr < 1e-9),
                       allow_position_fallback=False)
 

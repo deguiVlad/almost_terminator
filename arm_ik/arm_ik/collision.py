@@ -37,15 +37,33 @@ class TableGuard:
             return max(0.0, d)
         return 0.0
 
-    def collides_with_table(self, model, q, link_radius=0.05):
-        """Проверяет все звенья руки (с аппроксимацией «толщиной» link_radius)."""
+    def collides_with_table(self, model, q, link_radius=0.05, sample_step=0.025):
+        """Проверяет звенья как отрезки с радиусом, а не только суставные точки.
+
+        Это консервативная геометрическая аппроксимация для плоского стола.
+        Она не заменяет проверку полной collision geometry через MoveIt/FCL.
+        """
+        if link_radius < 0.0 or sample_step <= 0.0:
+            raise ValueError("link_radius must be >= 0 and sample_step must be > 0")
         Ts = chain_transforms(model, q)
         pts = [np.zeros(3)] + [T[:3, 3] for T in Ts]
         tcp = (Ts[-1] @ np.append(model.tcp_offset, 1.0))[:3]
         pts.append(tcp)
-        for p in pts:
-            if self.penetration(p - np.array([0, 0, link_radius])) > 0:
-                return True
+
+        def collides(p):
+            x, y, z = (float(v) for v in p)
+            inside = (self.x0 - link_radius <= x <= self.x1 + link_radius
+                      and abs(y) <= self.y_half + link_radius)
+            return inside and z - link_radius < self.h + self.margin
+
+        for a, b in zip(pts[:-1], pts[1:]):
+            delta = b - a
+            length = float(np.linalg.norm(delta))
+            count = max(1, int(np.ceil(length / sample_step)))
+            for i in range(count + 1):
+                p = a + delta * (float(i) / count)
+                if collides(p):
+                    return True
         return False
 
     def table_cost_gradient(self, model, q, k=50.0, link_radius=0.05):

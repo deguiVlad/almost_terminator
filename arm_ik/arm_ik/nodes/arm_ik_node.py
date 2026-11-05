@@ -363,25 +363,6 @@ class ArmIKNode(Node):
         except Exception:
             pass
 
-    def _tf_snapshot(self):
-        """([static TFMessage], [dynamic TFMessage]) из буфера TF2.
-
-        Берём и static-рёбра (/tf_static — постоянные origin'ы), и динамические
-        (/tf — активные суставные соединения симулятора).
-        """
-        static_msgs, dyn_msgs = [], []
-        try:
-            st, dy = self.tf_buffer.all_as_listofmessages()
-            static_msgs, dyn_msgs = list(st), list(dy)
-        except Exception:
-            try:  # старые версии tf2_ros: только all_frames_as_string/lookup
-                st, dy = self.tf_buffer.all_as_listofmessages() \
-                    if hasattr(self.tf_buffer, "all_as_listofmessages") else ([], [])
-                static_msgs, dyn_msgs = list(st), list(dy)
-            except Exception as e:
-                self.get_logger().debug(f"tf snapshot недоступен: {e}")
-        return static_msgs, dyn_msgs
-
     def try_build_urdf_models(self):
         """Build both arm models from an explicit URDF file or /robot_description."""
         if getattr(self, "_models_ready", False):

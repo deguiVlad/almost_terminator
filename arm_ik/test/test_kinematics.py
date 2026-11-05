@@ -10,7 +10,7 @@ pure-python массивы с numpy-объектами и падали бы на
 это либо настоящий numpy, либо чистый Python fallback (одинаковый API).
 
 Файловые тесты (URDF-скрипты, config/*.json) из пакета вычищены: дерево
-звеньев строится только из TF-сообщений симулятора (см. test_tree_from_tf.py).
+цепочка звеньев и limits берутся из URDF (см. test_urdf_model.py).
 """
 import math
 import os

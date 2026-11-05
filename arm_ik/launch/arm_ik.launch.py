@@ -50,6 +50,7 @@ def launch_setup(context, *args, **kwargs):
 
     params = {
         "use_sim_time": b("use_sim_time"),
+        "urdf_path": LaunchConfiguration("urdf_path").perform(context),
         "rate_hz": float(LaunchConfiguration("rate_hz").perform(context)),
         "spd_limit": float(LaunchConfiguration("spd_limit").perform(context)),
         "h_table": float(LaunchConfiguration("h_table").perform(context)),
@@ -85,12 +86,13 @@ def generate_launch_description():
         d("use_sim_time", "true", "время из /clock (симулятор)"),
         d("rate_hz", "50", "частота контура и генерации траектории"),
         d("spd_limit", "0.8", "жёсткий лимит скорости моторов рук, рад/с"),
-        d("h_table", "0.9", "высота поверхности стола над pelvis, м"),
+        d("h_table", "0.9", "высота поверхности стола над waist_yaw_link, м (после калибровки)"),
         d("table_margin", "0.02", "запас от стола, м"),
         d("tol_pos", "0.01", "допуск достижения цели по позиции, м"),
         d("tol_rot", "0.05", "допуск по ориентации, рад"),
         d("kp", "0.6", "усиление P-коррекции недолёта ПД-приводов"),
-        d("table_guard", "true", "включить защиту от стола"),
+        d("table_guard", "false", "включить защиту от стола после калибровки в waist_yaw_link"),
+        d("urdf_path", "/home/user/nssr-polygon/assets/robots/tiangong_pro/tiangong_pro_with_hands.urdf", "полный URDF TienKung 2.0 Pro"),
         d("tcp_offset", "", "смещение TCP от frame запястья x,y,z (пусто — из цепочки /tf)"),
         d("delta_reference", "measured", "опора delta-целей: measured | last_goal"),
         d("delta_accumulate", "false", "суммировать серию delta-смещений"),

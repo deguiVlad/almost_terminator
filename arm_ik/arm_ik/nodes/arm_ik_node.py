@@ -463,7 +463,7 @@ class ArmIKNode(Node):
         if len(msg.name) != len(msg.position):
             return
         values = dict(zip(msg.name, msg.position))
-        if not all(np.isfinite(float(v)) for v in values.values()):
+        if not all(math.isfinite(float(v)) for v in values.values()):
             return
         # Treat each JointState as a complete snapshot; do not silently mix
         # fresh values with stale joints from earlier partial messages.
@@ -477,7 +477,7 @@ class ArmIKNode(Node):
         if missing:
             raise RuntimeError("нет измерений /joint_states для: " + ", ".join(missing))
         q = np.asarray([self.joints[n] for n in model.names], dtype=float)
-        if not np.all(np.isfinite(q)):
+        if not all(math.isfinite(float(v)) for v in q):
             raise RuntimeError("некорректные значения /joint_states")
         return q
 

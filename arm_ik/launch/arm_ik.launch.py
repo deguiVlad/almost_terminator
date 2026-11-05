@@ -51,6 +51,7 @@ def launch_setup(context, *args, **kwargs):
     params = {
         "use_sim_time": b("use_sim_time"),
         "rate_hz": float(LaunchConfiguration("rate_hz").perform(context)),
+        "joint_state_timeout": float(LaunchConfiguration("joint_state_timeout").perform(context)),
         "spd_limit": float(LaunchConfiguration("spd_limit").perform(context)),
         "h_table": float(LaunchConfiguration("h_table").perform(context)),
         "table_margin": float(LaunchConfiguration("table_margin").perform(context)),
@@ -87,6 +88,7 @@ def generate_launch_description():
     return LaunchDescription([
         d("use_sim_time", "true", "время из /clock (симулятор)"),
         d("rate_hz", "50", "частота контура и генерации траектории"),
+        d("joint_state_timeout", "0.5", "watchdog свежести /joint_states, с"),
         d("spd_limit", "0.8", "жёсткий лимит скорости моторов рук, рад/с"),
         d("h_table", "0.9", "высота поверхности стола над waist_yaw_link, м (после калибровки)"),
         d("table_margin", "0.02", "запас от стола, м"),

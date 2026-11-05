@@ -162,6 +162,7 @@ class ArmIKNode(Node):
         self.declare_parameter("delta_accumulate", False)      # суммировать ли дельты между собой
         self.declare_parameter("delta_max_lin", 0.35)          # предохранитель на одну команду, м
         self.declare_parameter("delta_max_rot", 1.2)           # предохранитель на одну команду, рад
+        self.declare_parameter("delta_rotation_frame", "base") # base | tcp
         # --- встроенные демо-паблишеры (заменяют отдельные ноды demo_*) ---
         self.declare_parameter("demo_goals", False)   # публиковать PoseStamped-цели
         self.declare_parameter("demo_delta", False)   # публиковать TwistStamped-дельты
@@ -217,6 +218,7 @@ class ArmIKNode(Node):
         self.delta_accum = bool(self.get_parameter("delta_accumulate").value)
         self.delta_max_lin = float(self.get_parameter("delta_max_lin").value)
         self.delta_max_rot = float(self.get_parameter("delta_max_rot").value)
+        self.delta_rotation_frame = str(self.get_parameter("delta_rotation_frame").value).lower()
 
         # ---------------- состояние ----------------
         self.joints = {}
@@ -601,7 +603,7 @@ class ArmIKNode(Node):
         T[:3, 3] = [t.x, t.y, t.z]
         return T
 
-    def set_goal(self, side, T_des):
+    def set_goal(self, side, T_des, position_only=False, allow_position_fallback=True):
         """Общий конвейер: IK -> траектория (с защитой стола) -> исполнение."""
         if not self._tf_models_ready:
             self.get_logger().warn(f"[{side}] IK rejected: URDF model is not ready")
@@ -630,9 +632,27 @@ class ArmIKNode(Node):
 
         # 1) IK: multi-seed DLS с барьером стола
         seeds = self.seed_poses(model, q_now)
+        task_mask = ([True, True, True, False, False, False]
+                     if position_only else [True] * 6)
         q_sol, ok, epos, erot = ik_multi_seed(
             model, T_des_model, seeds, max_iter=350, tol_pos=self.tol_pos * 0.5,
-            tol_rot=self.tol_rot * 0.5, barrier=barrier)
+            tol_rot=self.tol_rot * 0.5, barrier=barrier, task_mask=task_mask)
+
+        relaxed_orientation = False
+        if not ok and allow_position_fallback and not position_only:
+            q_pos, ok_pos, ep_pos, er_pos = ik_multi_seed(
+                model, T_des_model, seeds, max_iter=400,
+                tol_pos=self.tol_pos * 0.5, tol_rot=self.tol_rot * 0.5,
+                barrier=barrier,
+                task_mask=[True, True, True, False, False, False])
+            if ok_pos:
+                q_sol, ok, epos, erot = q_pos, True, ep_pos, er_pos
+                T_des_model[:3, :3] = fk(model, q_sol)[0][:3, :3]
+                ex.T_des = T_des_model
+                relaxed_orientation = True
+                self.get_logger().warn(
+                    f"[{side}] position reachable; requested orientation relaxed "
+                    "to the reachable wrist orientation")
 
         dt = 1.0 / self.rate_hz
         if ok and self.guard is not None:
@@ -747,12 +767,21 @@ class ArmIKNode(Node):
         if nl < 1e-9 and nr < 1e-9:
             return  # нулевая дельта — ничего делать не нужно
 
-        T_des = delta_to_T(T_ref, dpos, drot)
+        # Translation is expressed in base axes. Rotation can use base
+        # axes (pre-multiply) or the TCP's own axes (post-multiply).
+        T_des = delta_to_T(T_ref, dpos, drot, base_ref=True)
+        if nr > 1e-9 and self.delta_rotation_frame == "tcp":
+            T_des[:3, :3] = T_ref[:3, :3] @ Rotation.from_rotvec(drot).as_matrix()
+        elif self.delta_rotation_frame not in ("base", "tcp"):
+            self.get_logger().error(
+                f"delta_rotation_frame must be 'base' or 'tcp', got {self.delta_rotation_frame!r}")
+            return
         self.get_logger().info(
             f"[{side}] delta-цель: dp=({dpos[0]:+.3f},{dpos[1]:+.3f},{dpos[2]:+.3f}) м, "
             f"dr=({drot[0]:+.3f},{drot[1]:+.3f},{drot[2]:+.3f}) рад "
             f"[ref={'last_goal' if use_last else 'measured'}]")
-        self.set_goal(side, T_des)
+        self.set_goal(side, T_des, position_only=(nl > 1e-9 and nr < 1e-9),
+                      allow_position_fallback=False)
 
     # ------------------------------------------------------------ service
     def solve_srv(self, req, res):

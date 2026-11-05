@@ -9,13 +9,12 @@ transient-local /robot_description). TF2 используется только �
   ВХОД (два способа задать позу кисти):
     * /arm_ik/goal_left, /arm_ik/goal_right   (geometry_msgs/PoseStamped)
         АБСОЛЮТНАЯ шестимерная поза TCP кисти (позиция + ориентация).
-        Рамка header.frame_id может быть любой из дерева TF
-        (pelvis, camera_head_link, ...) — узел сам перенесёт её в pelvis через TF2.
-        Рамка pelvis/пустая — без переноса («ориентация относительно корпуса»).
+        Рамка header.frame_id может быть любой из дерева TF — узел перенесёт её
+        в base_frame через TF2. Пустая рамка означает, что цель уже в base_frame.
     * /arm_ik/delta_left, /arm_ik/delta_right (geometry_msgs/TwistStamped)
         ОТНОСИТЕЛЬНОЕ шестимерное смещение: linear = dxyz (м),
-        angular = ось*угол (рад) — малое вращение в системе base_frame (pelvis).
-        Цель = текущая измеренная поза TCP (FK по /joint_states) + смещение.
+        angular = ось*угол (рад); оси выбираются параметром delta_rotation_frame.
+        Цель строится от измеренной позы или последней принятой цели — см. delta_reference.
         Опции поведения — параметры delta_reference / delta_accumulate /
         delta_max_* (подробности в README пакета).
     * ~/solve                                  (arm_ik/srv/SolveIK)
@@ -32,19 +31,18 @@ transient-local /robot_description). TF2 используется только �
                               idle | traj | fine | reached | failed + ошибки.
 
 Конвейер исполнения цели (подробно — README пакета):
-  1. TF-перенос цели в pelvis, клампинг выше стола (TableGuard);
+  1. TF-перенос цели в base_frame; клампинг выше стола, если TableGuard включён;
   2. IK: DLS из текущей измеренной позы + сиды-альтернативы (multi-seed),
      мягкий барьер от стола внутри шага IK;
-  3. траектория: trapezoidal профиль |dq/dt| <= 0.8 рад/с, валидация каждой
-     точки на коллизию со столом; при конфликте — заход через waypoint над
-     столом (две фазы профиля);
-  4. исполнение на rate_hz: пачка SetMotorPosition в /arm/cmd_pos;
+  3. синхронизированный trapezoidal профиль с лимитами скорости/ускорения;
+     при включённом TableGuard проверяются сегменты звеньев и raised waypoint;
+  4. исполнение на rate_hz: SetMotorPosition в /arm/cmd_pos, если bodyctrl_msgs доступен;
   5. фаза «fine»: замыкание контура по /joint_states — P-коррекция недолёта
      ПД-приводов (до 15 % по docs/INTERFACES.md) шагом dq = J+ e, клип
      ±0.1 рад/цикл (рекомендация FOCUS_TRACKING.md §3), пока ошибка позы
      не войдёт в tol_pos/tol_rot.
 
-Обе руки исполняются независимыми станми в одном узле: топик команд общий,
+Обе руки исполняются независимыми состояниями в одном узле: топик команд общий,
 но ID моторов не пересекаются.
 """
 import json
@@ -144,7 +142,7 @@ class ArmIKNode(Node):
         self.declare_parameter("kp", 0.6)              # коррекция недолёта ПД
         self.declare_parameter("ik_rotation_weight", 0.25) # приоритет позиции TCP над ориентацией
         self.declare_parameter("fine_max_cycles", 300) # страховка от бесконечной fine
-        self.declare_parameter("h_table", 0.9)         # высота стола над pelvis, м
+        self.declare_parameter("h_table", 0.9)         # высота стола в base_frame, м
         self.declare_parameter("table_x0", 0.35)
         self.declare_parameter("table_x1", 1.2)
         self.declare_parameter("table_y_half", 1.0)
@@ -152,7 +150,7 @@ class ArmIKNode(Node):
         self.declare_parameter("enable_table_guard", False)
         self.declare_parameter("waypoint_lift", 0.25)  # заход сверху, м (FOCUS_TRACKING §Шаг2)
         self.declare_parameter("n_seeds", 12)          # расширенный набор стартов IK
-        self.declare_parameter("tcp_offset", "")         # "x,y,z" поверх TF-цепочки (переопределить кончик)
+        self.declare_parameter("tcp_offset", "")         # legacy override смещения TCP из URDF
         # --- источник кинематической модели ---
         # URDF из urdf_path или /robot_description; TF используется только
         # для преобразования целевых поз между frame_id.

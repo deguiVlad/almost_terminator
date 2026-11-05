@@ -899,13 +899,15 @@ class ArmIKNode(Node):
 
 def main():
     rclpy.init()
-    node = ArmIKNode()
+    node = None
     try:
+        node = ArmIKNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
+        if node is not None:
+            node.destroy_node()
         rclpy.try_shutdown()
 
 

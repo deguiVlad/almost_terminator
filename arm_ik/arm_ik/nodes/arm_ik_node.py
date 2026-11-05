@@ -639,7 +639,7 @@ class ArmIKNode(Node):
         q_sol, ok, epos, erot = ik_multi_seed(
             model, T_des_model, seeds, max_iter=350, tol_pos=self.tol_pos * 0.5,
             tol_rot=self.tol_rot * 0.5, barrier=barrier,
-            task_weights=(1.0, self.ik_rotation_weight))
+            task_weights=(1.0, self.ik_rotation_weight), task_mask=task_mask)
 
         dt = 1.0 / self.rate_hz
         if ok and self.guard is not None:

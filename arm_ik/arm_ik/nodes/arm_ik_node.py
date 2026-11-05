@@ -656,10 +656,12 @@ class ArmIKNode(Node):
         if self.guard is not None:
             wp = T_des_model.copy()
             # waypoint поднимаем в системе IK; стол уже проверен в planning frame
-            q_wp, ok1, _, _ = ik_multi_seed(model, wp, seeds, max_iter=200,
-                                            barrier=barrier)
-            q_fin, ok2, _, _ = ik_multi_seed(model, T_des_model, [q_wp] + seeds, max_iter=200,
-                                             barrier=barrier)
+            q_wp, ok1, _, _ = ik_multi_seed(model, wp, seeds, max_iter=250,
+                                            barrier=barrier,
+                                            task_weights=(1.0, self.ik_rotation_weight))
+            q_fin, ok2, _, _ = ik_multi_seed(model, T_des_model, [q_wp] + seeds, max_iter=250,
+                                             barrier=barrier,
+                                             task_weights=(1.0, self.ik_rotation_weight))
             if ok1 and ok2:
                 t1 = joint_space_profile(q_now, q_wp, self.spd, self.a_max, dt)
                 t2 = joint_space_profile(q_wp, q_fin, self.spd, self.a_max, dt)

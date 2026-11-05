@@ -234,6 +234,18 @@ class _NP:
 
     # ---------- создание ----------
     @staticmethod
+    def shape(obj):
+        if isinstance(obj, _Array):
+            return obj.shape
+        if isinstance(obj, (list, tuple)):
+            if not obj:
+                return (0,)
+            if isinstance(obj[0], (list, tuple, _Array)):
+                return (len(obj),) + tuple(_NP.shape(obj[0]))
+            return (len(obj),)
+        return ()
+
+    @staticmethod
     def array(obj, dtype=None):
         if _is2d(obj):
             return _Array([_Array([float(v) for v in row]) for row in obj])
@@ -338,7 +350,12 @@ class _NP:
 
     @staticmethod
     def clip(v, lo, hi):
-        return _Array([min(hi, max(lo, float(x))) for x in v])
+        out = []
+        for i, value in enumerate(v):
+            low = float(lo[i]) if isinstance(lo, (list, tuple, _Array)) else float(lo)
+            high = float(hi[i]) if isinstance(hi, (list, tuple, _Array)) else float(hi)
+            out.append(min(high, max(low, float(value))))
+        return _Array(out)
 
     @staticmethod
     def sign(x):

@@ -846,11 +846,21 @@ class ArmIKNode(Node):
                 # До первой команды удерживаем фактически измеренную позу.
                 ex.hold_q = q_meas.copy()
 
-            # телеметрия: текущая поза TCP (FK от энкодеров)
-            ps = T_to_posemsg(fk(model, q_meas)[0])
-            ps.header.frame_id = self.base_frame
-            ps.header.stamp = now
-            self.pose_pubs[side].publish(ps)
+            # Telemetry is published in base_frame even when the URDF chain
+            # root (kinematics_base_frame) is a different TF frame.
+            try:
+                T_base_model = self._lookup_T(
+                    self.base_frame, self.kinematics_base_frame)
+                T_base_tcp = T_base_model @ fk(model, q_meas)[0]
+            except Exception as exc:
+                self.get_logger().warn(
+                    f"[{side}] cannot publish TCP pose: base TF unavailable: {exc}")
+                T_base_tcp = None
+            if T_base_tcp is not None:
+                ps = T_to_posemsg(T_base_tcp)
+                ps.header.frame_id = self.base_frame
+                ps.header.stamp = now
+                self.pose_pubs[side].publish(ps)
 
             if ex.traj is not None and ex.idx < len(ex.traj):
                 # Сохраняем последнюю реально отправленную точку траектории.

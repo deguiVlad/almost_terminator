@@ -50,6 +50,7 @@
 """
 import json
 import math
+from pathlib import Path
 
 from arm_ik._math_compat import np
 import rclpy
@@ -123,10 +124,13 @@ class ArmIKNode(Node):
     def __init__(self):
         super().__init__("arm_ik_node")
         # ---------------- параметры ----------------
+        # TableGuard выключен по умолчанию: URDF-модель работает в waist_yaw_link,
+        # а высота стола должна быть откалибрована именно в этой системе координат.
         # use_sim_time объявляется автоматически базовым классом Node (ROS 2 Humble);
         # ручное declare_parameter("use_sim_time", ...) роняло ноду с
         # ParameterAlreadyDeclaredException — не добавлять.
-        self.declare_parameter("base_frame", "pelvis")
+        self.declare_parameter("base_frame", "waist_yaw_link")
+        self.declare_parameter("urdf_path", "/home/user/nssr-polygon/assets/robots/tiangong_pro/tiangong_pro_with_hands.urdf")
         self.declare_parameter("rate_hz", 50.0)
         self.declare_parameter("spd_limit", 0.8)       # жёсткий лимит документации
         self.declare_parameter("a_max", 0.4)
@@ -139,7 +143,7 @@ class ArmIKNode(Node):
         self.declare_parameter("table_x1", 1.2)
         self.declare_parameter("table_y_half", 1.0)
         self.declare_parameter("table_margin", 0.02)
-        self.declare_parameter("enable_table_guard", True)
+        self.declare_parameter("enable_table_guard", False)
         self.declare_parameter("waypoint_lift", 0.25)  # заход сверху, м (FOCUS_TRACKING §Шаг2)
         self.declare_parameter("n_seeds", 4)           # альтернативных стартов IK
         self.declare_parameter("tcp_offset", "")         # "x,y,z" поверх TF-цепочки (переопределить кончик)
@@ -236,10 +240,10 @@ class ArmIKNode(Node):
 
         # ---------------- состояние ----------------
         self.joints = {}
+        self._urdf_xml = None
         self._t0 = self.get_clock().now()   # отсчёт для проверки /clock
         self.exec = {s: ArmExecutor(m) for s, m in self.models.items()}
         self._tf_last_try = None      # когда последний раз просили дерево TF
-        self._urdf_xml = None         # robot_description (для лимитов), если придёт
 
         # ---------------- ROS интерфейсы ----------------
         self.cmd_pub = None
@@ -353,6 +357,7 @@ class ArmIKNode(Node):
         """robot_description (URDF-XML) — источник точных лимитов суставов."""
         try:
             self._urdf_xml = str(msg.data)
+            self.try_build_tree_from_tf(force=True)
         except Exception:
             pass
 
@@ -393,7 +398,7 @@ class ArmIKNode(Node):
         self._tf_last_try = now
 
         static_msgs, dyn_msgs = self._tf_snapshot()
-        if not static_msgs and not dyn_msgs:
+        if not static_msgs and not dyn_msgs and not self._urdf_xml:
             waited = (now - self._t0).nanoseconds / 1e9
             if not getattr(self, "_tf_warned", False):
                 self.get_logger().warn(
@@ -442,7 +447,7 @@ class ArmIKNode(Node):
             self._tf_models_ready = True
             self._tf_warned = False
             self.get_logger().info(
-                "дерево звеньев IK построено из /tf + /tf_static: " +
+                "кинематическая модель IK построена (приоритет URDF, TF только для frame transforms): " +
                 ", ".join(f"{s}: {m.names[0]}..{m.names[-1]} -> {m.tip_link}"
                           for s, m in self.models.items()))
         return True
@@ -528,8 +533,14 @@ class ArmIKNode(Node):
     # ------------------------------------------------------------ goals
     def set_goal(self, side, T_des):
         """Общий конвейер: IK -> траектория (с защитой стола) -> исполнение."""
+        if not self._tf_models_ready:
+            self.get_logger().warn(f"[{side}] IK rejected: URDF model is not ready")
+            return False
         ex = self.exec[side]
         model = self.models[side]
+        if not all(name in self.joints for name in model.names):
+            self.get_logger().warn(f"[{side}] IK rejected: /joint_states has not supplied all 7 arm joints")
+            return False
         if self.guard is not None:
             T_des[:3, 3] = self.guard.clamp_target_above_table(T_des[:3, 3])
         ex.T_des = T_des
@@ -586,6 +597,9 @@ class ArmIKNode(Node):
 
     def on_goal(self, side, goal: PoseStamped):
         """Абсолютная шестимерная цель TCP (PoseStamped)."""
+        if not self._tf_models_ready:
+            self.get_logger().warn(f"[{side}] goal rejected: waiting for /robot_description")
+            return
         try:
             T_des = self.to_base_T(goal)
         except Exception as e:  # TF ещё не доступен
@@ -611,13 +625,29 @@ class ArmIKNode(Node):
         delta_accumulate=true — дельты суммируются от опорной точки первой дельты
         серии (джойстик-режим: каждая новая команда двигает дальше).
         """
+        if not self._tf_models_ready:
+            self.get_logger().warn(f"[{side}] delta rejected: URDF model is not ready")
+            return
         ex = self.exec[side]
         fid = msg.header.frame_id
-        if fid not in ("", self.base_frame, "base_link"):
-            self.get_logger().warn(
-                f"[{side}] delta в рамке '{fid}' трактуется как {self.base_frame} (перенос не выполняется)")
         dpos = np.array([msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z])
         drot = np.array([msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z])
+        if fid not in ("", self.base_frame, "base_link"):
+            try:
+                tfm = self.tf_buffer.lookup_transform(
+                    self.base_frame, fid, rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.2))
+                rot = tfm.transform.rotation
+                R_frame_base = Rotation.from_quat([rot.x, rot.y, rot.z, rot.w]).as_matrix()
+                dpos = R_frame_base @ dpos
+                drot = R_frame_base @ drot
+            except Exception as exc:
+                self.get_logger().warn(
+                    f"[{side}] delta rejected: TF {self.base_frame}<-{fid} unavailable: {exc}")
+                return
+        if not all(name in self.joints for name in self.models[side].names):
+            self.get_logger().warn(f"[{side}] delta rejected: /joint_states is incomplete")
+            return
 
         # опорная поза выбирается ДО валидации и не меняется при отклонении дельты
         use_last = (self.delta_ref == "last_goal" and ex.last_T_des is not None) or \
@@ -667,12 +697,16 @@ class ArmIKNode(Node):
         self.try_build_tree_from_tf()
         if not getattr(self, "_clock_checked", False):
             self._check_sim_clock()
+        if not self._tf_models_ready:
+            return
         for side, model in self.models.items():
             ex = self.exec[side]
+            if not all(name in self.joints for name in model.names):
+                continue
             q_meas = self.q_meas(model)
 
             # телеметрия: текущая поза TCP (FK от энкодеров)
-            ps = T_to_posemsg(fk(model, q_meas)[0] @ _tmat(model.tcp_offset, [0, 0, 0]))
+            ps = T_to_posemsg(fk(model, q_meas)[0])
             ps.header.frame_id = self.base_frame
             ps.header.stamp = now
             self.pose_pubs[side].publish(ps)

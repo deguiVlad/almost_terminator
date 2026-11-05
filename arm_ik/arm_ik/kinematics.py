@@ -50,6 +50,7 @@ class ArmModel:
     base_frame: str = "pelvis"     # система координат цели (относительно корпуса)
     # Смещение точки Tool-Center-Point от системы запястья (в метрах, в рамке tip_link).
     tcp_offset: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 0.0]))
+    tcp_rpy: np.ndarray = field(default_factory=lambda: np.zeros(3))
 
     @property
     def names(self):
@@ -107,7 +108,7 @@ def fk(model: ArmModel, q, tcp=True):
     Ts = chain_transforms(model, q)
     Ttip = Ts[-1]
     if tcp:
-        Ttip = Ttip @ _tmat(model.tcp_offset, [0, 0, 0])
+        Ttip = Ttip @ _tmat(model.tcp_offset, model.tcp_rpy)
     pts = [np.array([0.0, 0.0, 0.0])] + [T[:3, 3] for T in Ts]
     return Ttip, np.array(pts)
 
@@ -147,7 +148,7 @@ def geometric_jacobian(model: ArmModel, q, point=None):
     """
     Ts = chain_transforms(model, q)
     if point is None:
-        p = (Ts[-1] @ np.append(model.tcp_offset, 1.0))[:3]
+        p = (Ts[-1] @ _tmat(model.tcp_offset, model.tcp_rpy))[:3, 3]
     else:
         p = np.asarray(point, dtype=float)
     Fs = joint_frames(model, q)
@@ -398,7 +399,8 @@ def arm_from_dict(d):
     return ArmModel(
         side=d["side"], joints=joints, tip_link=d["tip_link"],
         base_frame=d.get("base_frame", "pelvis"),
-        tcp_offset=np.array(d.get("tcp_offset", [0.0, 0.0, 0.0]), dtype=float))
+        tcp_offset=np.array(d.get("tcp_offset", [0.0, 0.0, 0.0]), dtype=float),
+        tcp_rpy=np.array(d.get("tcp_rpy", [0.0, 0.0, 0.0]), dtype=float))
 
 
 def make_default_arm(side: str) -> ArmModel:

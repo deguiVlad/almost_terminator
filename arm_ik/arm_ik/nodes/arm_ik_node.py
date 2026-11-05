@@ -19,10 +19,6 @@
         Цель = текущая измеренная поза TCP (FK по /joint_states) + смещение.
         Опции поведения — параметры delta_reference / delta_accumulate /
         delta_max_* (подробности в README пакета).
-    * ~/solve                                  (arm_ik/srv/SolveIK)
-        решить IK без движения (для планирования/отладки верхним уровнем).
-        Сервис появляется только если пакет собран с rosidl-генерацией srv
-        (см. README); без него узел полностью работает от топиков целей.
   ВЫХОД:
     * /arm/cmd_pos            (bodyctrl_msgs/CmdSetMotorPosition) — команды моторов
                               11..17 (левая) и 21..27 (правая), spd <= 0.8 рад/с.
@@ -56,6 +52,9 @@ from arm_ik._math_compat import np
 import rclpy
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from rclpy.node import Node
+from rclpy.time import Time
+from rclpy.duration import Duration
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from arm_ik._math_compat import Rotation
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
@@ -175,17 +174,11 @@ class ArmIKNode(Node):
         self.base_frame = self.get_parameter("base_frame").value
         self.kinematics_base_frame = self.get_parameter("kinematics_base_frame").value
         self.urdf_path = str(self.get_parameter("urdf_path").value).strip()
-        # ---------------- источник дерева звеньев для IK ----------------
-        # Цепочка звеньев строится из топиков симулятора /tf и /tf_static
-        # (см. arm_ik.tree_from_tf); файлы URDF/JSON не читаются.
-        self.tf_wait_timeout = float(self.get_parameter("tf_wait_timeout").value)
-        self.tf_refresh = float(self.get_parameter("tf_refresh_period").value)
-        # стартовые модели — встроенная заглушка (нужны сразу для FK/телеметрии),
-        # затем перезаменяются деревом из /tf+/tf_static, как только оно появится
-        # в буфере TF2.
+        # Временные заглушки используются только для создания executor state;
+        # IK и публикация команд блокируются до успешной загрузки URDF.
         self.models = {"left": make_default_arm("left"),
                        "right": make_default_arm("right")}
-        self._tf_models_ready = False
+        self._models_ready = False
         for m in self.models.values():
             m.base_frame = self.kinematics_base_frame
         tof = self.get_parameter("tcp_offset").value
@@ -259,21 +252,20 @@ class ArmIKNode(Node):
             "left": self.create_publisher(String, "/arm_ik/left/status", 10),
             "right": self.create_publisher(String, "/arm_ik/right/status", 10)}
 
-        # TF2: перенос произвольной рамки цели в base_frame + источник дерева
-        # звеньев для IK (топики симулятора /tf и /tf_static)
+        # TF2 используется только для преобразования целевых поз между рамками.
         self.tf_buffer = tf2_ros.Buffer()
         tf2_ros.TransformListener(self.tf_buffer, self)
 
         try:  # лимиты суставов по возможности берём из robot_description
             self.create_subscription(
                 String, "/robot_description", self.on_robot_desc,
-                rclpy.qos.QoSProfile(
-                    reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
-                    history=rclpy.qos.HistoryPolicy.KEEP_LAST, depth=1,
-                    durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL))
+                QoSProfile(
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    history=HistoryPolicy.KEEP_LAST, depth=1,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL))
         except Exception:
             pass
-        # первая попытка построить дерево — сразу, далее по таймеру step
+        # Первая попытка загрузить URDF выполняется сразу, далее повторяется в step().
         self.try_build_urdf_model()
 
         self.timer = self.create_timer(1.0 / self.rate_hz, self.step)
@@ -299,7 +291,7 @@ class ArmIKNode(Node):
                 float(self.get_parameter("demo_period").value), self.demo_tick)
 
         self.get_logger().info(
-            f"arm_ik_node ready | waiting_for_urdf={not self._tf_models_ready} | "
+            f"arm_ik_node ready | waiting_for_urdf={not self._models_ready} | "
             f"guard={'ON h=%.2f' % self.guard.h if self.guard else 'OFF'} | "
             "custom service=disabled")
 
@@ -342,17 +334,17 @@ class ArmIKNode(Node):
         """Полный URDF из robot_description — источник кинематики и лимитов."""
         try:
             self._urdf_xml = str(msg.data)
-            self.try_build_urdf_model(force=True)
+            self.try_build_urdf_model()
         except Exception:
             pass
 
-    def try_build_urdf_model(self, force=False):
+    def try_build_urdf_model(self):
         """Load exact arm chains and joint limits from URDF.
 
         TF alone is deliberately not accepted as a kinematic source: it cannot
         recover the original joint axes, types or hard position limits.
         """
-        if getattr(self, "_urdf_models_ready", False):
+        if self._models_ready:
             return True
 
         urdf_xml = self._urdf_xml
@@ -393,8 +385,7 @@ class ArmIKNode(Node):
             self.models = models
             for side, model in models.items():
                 self.exec[side].model = model
-            self._urdf_models_ready = True
-            self._tf_models_ready = True
+            self._models_ready = True
             self.get_logger().info(
                 "Exact IK models loaded from URDF: " + "; ".join(
                     f"{side}: {model.names[0]}..{model.names[-1]} -> {model.tip_link}, "
@@ -410,7 +401,11 @@ class ArmIKNode(Node):
 
     def _demo_sides(self):
         side = str(self.get_parameter("demo_side").value)
-        return ["left", "right"] if side == "both" else [side]
+        if side == "both":
+            return ["left", "right"]
+        if side in ("left", "right"):
+            return [side]
+        raise ValueError("demo_side must be 'left', 'right' or 'both'")
 
     def demo_tick(self):
         """Периодическая публикация демо-целей/дельт (внутренний таймер ноды)."""
@@ -478,9 +473,9 @@ class ArmIKNode(Node):
             return pose_to_T(goal.pose)
         stamp = (rclpy.time.Time.from_msg(goal.header.stamp)
                  if goal.header.stamp.sec or goal.header.stamp.nanosec
-                 else rclpy.time.Time())
+                 else Time())
         tfm = self.tf_buffer.lookup_transform(self.base_frame, fid, stamp,
-                                              timeout=rclpy.duration.Duration(seconds=0.5))
+                                              timeout=Duration(seconds=0.5))
         t = tfm.transform.translation
         r = tfm.transform.rotation
         T_bc = np.eye(4)

@@ -366,6 +366,14 @@ def pose_to_T(pos, quat_wxyz):
     """4x4 матрица позы из (позиция 3, кватернион wxyz 4)."""
     pos = np.asarray(pos, dtype=float)
     q = np.asarray(quat_wxyz, dtype=float)
+    if pos.shape != (3,) or q.shape != (4,):
+        raise ValueError("position must have 3 values and quaternion wxyz must have 4")
+    if not np.all(np.isfinite(pos)) or not np.all(np.isfinite(q)):
+        raise ValueError("pose values must be finite")
+    norm = float(np.linalg.norm(q))
+    if norm < 1e-12:
+        raise ValueError("quaternion must have non-zero norm")
+    q = q / norm
     T = np.eye(4)
     T[:3, :3] = Rotation.from_quat([q[1], q[2], q[3], q[0]]).as_matrix()
     T[:3, 3] = pos

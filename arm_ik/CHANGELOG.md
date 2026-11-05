@@ -21,5 +21,4 @@
 
 ## Earlier releases
 
-Historical implementation notes from versions 0.1.0–0.2.2 are retained below.
-They describe earlier iterations and may not match the current implementation.
+Historical notes from earlier development snapshots were omitted here because they describe superseded behavior.

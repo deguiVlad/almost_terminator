@@ -17,8 +17,16 @@ def joint_space_profile(q0, q1, v_max=0.8, a_max=0.4, dt=0.02):
     конечных разностей не превышает крейсерской скорости трапеции).
     Возвращает массив (N, n_joints), включая q0 и q1.
     """
+    if not all(np.isfinite(float(v)) for v in (v_max, a_max, dt)):
+        raise ValueError("v_max, a_max and dt must be finite")
+    if v_max <= 0.0 or a_max <= 0.0 or dt <= 0.0:
+        raise ValueError("v_max, a_max and dt must be positive")
     q0 = np.asarray(q0, float)
     q1 = np.asarray(q1, float)
+    if q0.shape != q1.shape or q0.ndim != 1:
+        raise ValueError("q0 and q1 must be one-dimensional arrays of equal length")
+    if not np.all(np.isfinite(q0)) or not np.all(np.isfinite(q1)):
+        raise ValueError("joint positions must be finite")
     dq = q1 - q0
     d = np.abs(dq)
     # минимальное время на каждую ось: треугольник или трапеция
@@ -50,8 +58,11 @@ def joint_space_profile(q0, q1, v_max=0.8, a_max=0.4, dt=0.02):
         traj[:, i] = q0[i] + sign * pos
         traj[-1, i] = q1[i]
     # страховка: если из-за квантования dt где-то превысили лимит — растягиваем
-    v = np.abs(np.diff(traj, axis=0)).max() / dt
-    if v > v_max:
-        scale = min(1.25, v / v_max)       # одна итерация обычно достаточна
-        return joint_space_profile(q0, q1, v_max=v_max / scale, a_max=a_max, dt=dt)
+    sample_dt = float(ts[1] - ts[0]) if len(ts) > 1 else dt
+    v = float(np.abs(np.diff(traj, axis=0)).max()) / sample_dt
+    if v > v_max * (1.0 + 1e-10):
+        # Уменьшаем допустимую скорость и пересчитываем весь профиль.
+        # Время между сэмплами равно T/(N-1), а не обязательно заданному dt.
+        return joint_space_profile(
+            q0, q1, v_max=v_max * (v_max / v), a_max=a_max, dt=dt)
     return traj

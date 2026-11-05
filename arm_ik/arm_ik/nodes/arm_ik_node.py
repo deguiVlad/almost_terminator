@@ -10,19 +10,18 @@
   ВХОД (два способа задать позу кисти):
     * /arm_ik/goal_left, /arm_ik/goal_right   (geometry_msgs/PoseStamped)
         АБСОЛЮТНАЯ шестимерная поза TCP кисти (позиция + ориентация).
-        Рамка header.frame_id может быть любой из дерева TF
-        (pelvis, camera_head_link, ...) — узел сам перенесёт её в pelvis через TF2.
-        Рамка pelvis/пустая — без переноса («ориентация относительно корпуса»).
+        Рамка header.frame_id может быть любой доступной в TF; узел переносит
+        цель в base_frame. Пустая/base_frame — без дополнительного преобразования.
     * /arm_ik/delta_left, /arm_ik/delta_right (geometry_msgs/TwistStamped)
         ОТНОСИТЕЛЬНОЕ шестимерное смещение: linear = dxyz (м),
-        angular = ось*угол (рад) — малое вращение в системе base_frame (pelvis).
+        angular = ось*угол (рад) — rotation vector, не угловая скорость.
         Цель = текущая измеренная поза TCP (FK по /joint_states) + смещение.
         Опции поведения — параметры delta_reference / delta_accumulate /
         delta_max_* (подробности в README пакета).
   ВЫХОД:
     * /arm/cmd_pos            (bodyctrl_msgs/CmdSetMotorPosition) — команды моторов
                               11..17 (левая) и 21..27 (правая), spd <= 0.8 рад/с.
-    * /arm_ik/wrist_{left,right}_pose (PoseStamped, рамка pelvis) — текущая поза
+    * /arm_ik/wrist_{left,right}_pose (PoseStamped, рамка base_frame) — текущая поза
                               TCP по FK от /joint_states (видно в RViz, полезно
                               верхнему уровню как «где сейчас кисть»).
     * /arm_ik/{left,right}/status (std_msgs/String, JSON) — фаза контура:
@@ -171,8 +170,10 @@ class ArmIKNode(Node):
         self.declare_parameter("demo_dz", 0.0)        # delta: смещение вверх, м
         self.declare_parameter("demo_period", 8.0)    # с между публикациями
 
-        self.base_frame = self.get_parameter("base_frame").value
-        self.kinematics_base_frame = self.get_parameter("kinematics_base_frame").value
+        self.base_frame = str(self.get_parameter("base_frame").value).strip()
+        self.kinematics_base_frame = str(self.get_parameter("kinematics_base_frame").value).strip()
+        if not self.base_frame or not self.kinematics_base_frame:
+            raise ValueError("base_frame and kinematics_base_frame must be non-empty")
         self.urdf_path = str(self.get_parameter("urdf_path").value).strip()
         # Временные заглушки используются только для создания executor state;
         # IK и публикация команд блокируются до успешной загрузки URDF.
@@ -183,9 +184,11 @@ class ArmIKNode(Node):
             m.base_frame = self.kinematics_base_frame
         tof = self.get_parameter("tcp_offset").value
         if tof:
-            v = [float(t) for t in str(tof).split(",")]
+            v = np.asarray([float(t) for t in str(tof).split(",")], dtype=float)
+            if v.shape != (3,) or not np.all(np.isfinite(v)):
+                raise ValueError("tcp_offset must contain exactly three finite numbers")
             for m in self.models.values():
-                m.tcp_offset = np.array(v)
+                m.tcp_offset = v.copy()
 
         self.guard = TableGuard(self.get_parameter("h_table").value,
                                 self.get_parameter("table_x0").value,
@@ -206,7 +209,7 @@ class ArmIKNode(Node):
         self.tol_pos = float(self.get_parameter("tol_pos").value)
         self.tol_rot = float(self.get_parameter("tol_rot").value)
         self.kp = float(self.get_parameter("kp").value)
-        self.ik_rotation_weight = max(0.05, float(self.get_parameter("ik_rotation_weight").value))
+        self.ik_rotation_weight = float(self.get_parameter("ik_rotation_weight").value)
         self.fine_max = int(self.get_parameter("fine_max_cycles").value)
         self.lift = float(self.get_parameter("waypoint_lift").value)
         self.n_seeds = int(self.get_parameter("n_seeds").value)
@@ -215,6 +218,21 @@ class ArmIKNode(Node):
         self.delta_max_lin = float(self.get_parameter("delta_max_lin").value)
         self.delta_max_rot = float(self.get_parameter("delta_max_rot").value)
         self.delta_rotation_frame = str(self.get_parameter("delta_rotation_frame").value).lower()
+
+        numeric_positive = {
+            "tol_pos": self.tol_pos, "tol_rot": self.tol_rot, "kp": self.kp,
+            "ik_rotation_weight": self.ik_rotation_weight,
+            "delta_max_lin": self.delta_max_lin, "delta_max_rot": self.delta_max_rot,
+        }
+        if any(not math.isfinite(v) or v <= 0.0 for v in numeric_positive.values()):
+            raise ValueError("positive finite parameters required: " +
+                             ", ".join(numeric_positive))
+        if self.fine_max <= 0 or self.n_seeds <= 0 or not math.isfinite(self.lift) or self.lift < 0.0:
+            raise ValueError("fine_max_cycles and n_seeds must be positive; waypoint_lift must be >= 0")
+        if self.delta_ref not in ("measured", "last_goal"):
+            raise ValueError("delta_reference must be 'measured' or 'last_goal'")
+        if self.delta_rotation_frame not in ("base", "tcp"):
+            raise ValueError("delta_rotation_frame must be 'base' or 'tcp'")
 
         # ---------------- состояние ----------------
         self.joints = {}
@@ -287,8 +305,10 @@ class ArmIKNode(Node):
                 for s in self._demo_sides()}
             self.get_logger().info("demo_delta ON -> публикация TwistStamped смещений")
         if self.demo_goal_pubs or self.demo_delta_pubs:
-            self.demo_timer = self.create_timer(
-                float(self.get_parameter("demo_period").value), self.demo_tick)
+            demo_period = float(self.get_parameter("demo_period").value)
+            if not math.isfinite(demo_period) or demo_period <= 0.0:
+                raise ValueError("demo_period must be finite and positive")
+            self.demo_timer = self.create_timer(demo_period, self.demo_tick)
 
         self.get_logger().info(
             f"arm_ik_node ready | waiting_for_urdf={not self._models_ready} | "

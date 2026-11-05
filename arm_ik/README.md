@@ -107,6 +107,7 @@ ros2 launch arm_ik arm_ik.launch.py demo_delta:=true delta_side:=right delta_x:=
 | `kinematics_base_frame` | `waist_yaw_link` | URDF chain root. |
 | `urdf_path` | empty | Optional URDF file; otherwise wait for `/robot_description`. |
 | `rate_hz` | 50 | Control-loop rate. |
+| `joint_state_timeout` | 0.5 s | Stop publishing commands when feedback is older than this. |
 | `spd_limit` | 0.8 rad/s | Command speed cap (never above 0.8). |
 | `a_max` | 0.4 rad/s² | Trajectory acceleration cap. |
 | `tol_pos` / `tol_rot` | 0.01 m / 0.05 rad | Goal tolerances. |
@@ -129,7 +130,11 @@ ros2 launch arm_ik arm_ik.launch.py demo_delta:=true delta_side:=right delta_x:=
 - The table guard is a plane approximation, not full self-collision or
   environment collision checking. It is disabled by default and must be
   calibrated before enabling.
-- Numerical IK can reject unreachable or poorly conditioned targets.
+- Numerical IK can reject unreachable or poorly conditioned targets. For absolute
+  goals only, an unreachable orientation may be relaxed while preserving the
+  position target.
+- The node requires fresh, complete `/joint_states` snapshots; stale feedback
+  moves active execution to `failed` and stops publishing motor commands.
 - `srv/SolveIK.srv` is currently only a source definition; this ament_python
   package does not generate it. The supported public interface is topics.
 - Offline tests do not certify ROS 2 integration or real-hardware safety.

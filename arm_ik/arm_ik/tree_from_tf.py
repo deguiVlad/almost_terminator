@@ -1,28 +1,11 @@
-# -*- coding: utf-8 -*-
-"""Кинематическое дерево звеньев рук из топиков симулятора /tf и /tf_static.
+"""Legacy TF-message inspection helpers.
 
-Вместо файлов (config/arms.json, URDF на диске) структура звеньев берётся из
-живого TF2-дерева:
-
-  * рёбра /tf_static — постоянные смещения звеньев (fixed-соединения URDF);
-  * рёбра /tf        — активные (вращательные) соединения; их child-рамки
-    сопоставляются с именами суставов из /joint_states по суффиксу стороны
-    (_l/_left, _r/_right);
-  * пределы суставов — из топика /robot_description (лимиты, переданные
-    симулятором), затем — встроенные типовые значения (docs/INTERFACES.md),
-    иначе ±pi. Файлы с диска не читаются.
-
-Модуль НЕ импортирует rclpy/tf2_ros на уровне модуля: данные принимаются
-обычными кортежами (см. tf_edges / tf_constants), поэтому тестируется офлайн.
-ROS-нода извлекает кортежи из tf2_ros.Buffer.all_as_listofmessages().
-
-Выход — dict внутренней конфигурации руки, который читает
-arm_ik.kinematics.arm_from_dict (файл-конфиг для этого не нужен).
+TF transforms are useful for frame conversion and diagnostics, but they do not
+contain the original URDF joint axes. Consequently this module never builds an
+IK model from TF-only data. Runtime arm models are built by arm_ik.urdf_model.
 """
-from __future__ import annotations
 
-import collections
-import math
+from __future__ import annotations
 
 from arm_ik._math_compat import np
 from arm_ik._math_compat import Rotation
@@ -70,9 +53,6 @@ def side_of(name):
     return None
 
 
-def is_arm_joint(name):
-    s = _stem(name).lower()
-    return any(kw in s for kw in KEYWORDS)
 
 
 # ---------------------------------------------------------------------------
@@ -145,39 +125,6 @@ def tf_constants(static_msgs, dynamic_msgs):
 # Обход дерева
 # ---------------------------------------------------------------------------
 
-def build_tree(edges):
-    children = collections.defaultdict(list)
-    for p, c in edges:
-        children[p].append(c)
-    return children
-
-
-def find_chain(children, base, joints_links):
-    """Путь base -> самый глубокий сустав руки (список рамок, включая оба конца)."""
-    best = None
-    stack = [[base]]
-    target = set(joints_links)
-    while stack:
-        path = stack.pop()
-        node = path[-1]
-        if node in target and (best is None or len(path) > len(best)):
-            best = list(path)
-        for ch in children.get(node, ()):
-            if ch not in path:                    # защита от циклов
-                stack.append(path + [ch])
-    return best
-
-
-def fold_origin(T_abs_prev_inv, T_abs_joint):
-    """origin_i = inv(T_{i-1}) @ T_i — позиция/ориентация кадра сустава
-    в системе предыдущего звена (до его собственного поворота)."""
-    O = np.linalg.inv(np.asarray(T_abs_prev_inv, dtype=float)) @ \
-        np.asarray(T_abs_joint, dtype=float)
-    xyz = [float(v) for v in O[:3, 3]]
-    rpy = [float(v) for v in Rotation.from_matrix(O[:3, :3]).as_euler("xyz")]
-    return xyz, rpy
-
-
 def motor_id_for(joint_name):
     jn = joint_name.lower()
     if jn in MOTOR_IDS:
@@ -197,213 +144,27 @@ def motor_id_for(joint_name):
     return 0
 
 
-def build_side_config(edges, constants, joint_names, base, side,
-                      tip_hint=None):
-    """dict одной руки (формат arms.json) из TF-дерева; None если рука не найдена.
-
-    Суставной кадр = child-ребро, чей stem совпадает со stem сустава.
-    Ось вращения выводится из движения кадра во времени: ось — собственный
-    Z кадра сустава (стандарт URDF->TF: вращение происходит вокруг оси
-    собственной рамки child). Все origin'ы пересчитываются в системы
-    ПРЕДЫДУЩИХ звеньев (как требует JointSpec/URDF).
-    """
-    children = build_tree(edges)
-    link_by_stem = {}
-    for p, c in edges:
-        link_by_stem.setdefault(_stem(c), c)
-    all_frames = {c for _, c in edges} | {p for p, _ in edges}
-
-    js = sorted({n for n in joint_names
-                 if is_arm_joint(n) and side_of(n) == side})
-    if not js:
-        return None
-    # связь имя сустава -> TF-рамка
-    j2link = {}
-    for n in js:
-        stem = _stem(n)
-        if stem in link_by_stem:
-            j2link[n] = link_by_stem[stem]
-        else:
-            for lk in all_frames:
-                if _stem(lk) == stem:
-                    j2link[n] = lk
-                    break
-    reachable = {j: l for j, l in j2link.items()
-                 if find_chain(children, base, [l]) is not None}
-    if not reachable:
-        return None
-    chains = {j: find_chain(children, base, [l]) for j, l in reachable.items()}
-    deepest_j = max(chains, key=lambda j: len(chains[j]))
-    chain = chains[deepest_j]                     # base ... link последнего сустава
-
-    # суставы строго в порядке глубины вдоль найденной цепочки
-    pos_in_chain = {lk: i for i, lk in enumerate(chain)}
-    ordered = sorted(((pos_in_chain[l], j) for j, l in reachable.items()
-                      if l in pos_in_chain))
-    if not ordered:
-        return None
-
-    from arm_ik.kinematics import _tmat
-    # абсолютные кадры рамок в системе base (по фиксированным рёбрам;
-    # активные рёбра дают кадр сустава «как есть» — годится для origin,
-    # потому что IK-модель сама добавляет поворот вокруг оси)
-    def abs_T(frame):
-        path = find_chain(children, base, [frame])
-        if path is None:
-            return None
-        T = np.eye(4)
-        for a, b in zip(path[:-1], path[1:]):
-            Te = constants.get((a, b))
-            if Te is not None:
-                T = T @ np.asarray(Te, dtype=float)
-        return T
-
-    out_joints = []
-    prev_abs = np.eye(4)                          # кадр base
-    for _pos, jn in ordered:
-        lk = reachable[jn]
-        cur_abs = abs_T(lk)
-        if cur_abs is None:
-            continue
-        xyz, rpy = fold_origin(prev_abs, cur_abs)
-        out_joints.append({
-            "name": jn,
-            "motor_id": int(motor_id_for(jn)),
-            "axis": [0.0, 0.0, 1.0],   # собственная Z-ось кадра сустава
-            "origin_xyz": xyz,
-            "origin_rpy": rpy,
-            "limits": [-math.pi, math.pi],
-        })
-        # кадр «после» поворота этого сустава (нейтральный q_i=0): origin
-        # следующего сустава вычитается именно из него; постоянная часть
-        # суставного ребра уже сидит в Tj, собственный угол TF-кадра при
-        # съёмке в нейтральной позе равен нулю
-        prev_abs = prev_abs @ _tmat(xyz, rpy)
-    if not out_joints:
-        return None
-
-    # кончик кисти: идём дальше от последнего сустава до листа дерева
-    last_frame = reachable[ordered[-1][1]]
-    tip = tip_hint or last_frame
-    cur = last_frame
-    advanced = True
-    while advanced:
-        advanced = False
-        for ch in children.get(cur, ()):
-            if not is_arm_joint(ch):
-                tip, cur = ch, ch
-                advanced = True
-                break
-    # tcp_offset: смещение TCP от frame последнего сустава (leaf fixed-цепь)
-    tcp = [0.0, 0.0, 0.0]
-    if tip != last_frame:
-        path = find_chain(children, last_frame, [tip])
-        if path:
-            Trel = np.eye(4)
-            for a, b in zip(path[:-1], path[1:]):
-                Te = constants.get((a, b))
-                if Te is not None:
-                    Trel = Trel @ np.asarray(Te, dtype=float)
-            tcp = [float(v) for v in Trel[:3, 3]]
-
-    return {"side": side, "tip_link": tip,
-            "tcp_offset": tcp, "joints": out_joints}
-
-
-
-def build_side_config_from_urdf(urdf_xml, base_frame, side):
-    """Build exact arm chain (origins, axes, limits and terminal fixed transform) from URDF."""
-    import xml.etree.ElementTree as ET
-    from arm_ik.kinematics import _tmat
-    root = ET.fromstring(urdf_xml)
-    joints = {}
-    children = collections.defaultdict(list)
-    for j in root.findall("joint"):
-        p, c = j.find("parent"), j.find("child")
-        if p is not None and c is not None:
-            joints[j.get("name")] = j
-            children[p.get("link")].append((j.get("name"), c.get("link")))
-    tip = "L_base_link" if side == "left" else "R_base_link"
-    stack, path = [(base_frame, [])], None
-    while stack:
-        link, chain = stack.pop()
-        if link == tip:
-            path = chain
-            break
-        for name, child in children.get(link, []):
-            stack.append((child, chain + [name]))
-    if path is None:
-        return None
-    result, fixed = [], np.eye(4)
-    for name in path:
-        j = joints[name]
-        origin = j.find("origin")
-        xyz = [float(v) for v in (origin.get("xyz", "0 0 0").split() if origin is not None else [0, 0, 0])]
-        rpy = [float(v) for v in (origin.get("rpy", "0 0 0").split() if origin is not None else [0, 0, 0])]
-        T0 = _tmat(xyz, rpy)
-        if j.get("type") == "fixed":
-            fixed = fixed @ T0
-            continue
-        if j.get("type") not in ("revolute", "continuous"):
-            raise ValueError("Unsupported arm joint type: " + name)
-        axis_el, limit = j.find("axis"), j.find("limit")
-        axis = [float(v) for v in (axis_el.get("xyz", "1 0 0").split() if axis_el is not None else [1, 0, 0])]
-        if j.get("type") == "continuous":
-            lo, hi = -math.pi, math.pi
-        elif limit is not None:
-            lo, hi = float(limit.get("lower", -math.pi)), float(limit.get("upper", math.pi))
-        else:
-            raise ValueError("Missing joint limits: " + name)
-        T_joint = fixed @ T0
-        result.append({
-            "name": name, "motor_id": int(motor_id_for(name)), "axis": axis,
-            "origin_xyz": [float(v) for v in T_joint[:3, 3]],
-            "origin_rpy": [float(v) for v in Rotation.from_matrix(T_joint[:3, :3]).as_euler("xyz")],
-            "limits": [lo, hi],
-        })
-        fixed = np.eye(4)
-    if len(result) != 7:
-        raise ValueError(f"{side}: expected 7 revolute arm joints, found {len(result)}")
-    return {
-        "side": side, "tip_link": tip, "joints": result,
-        "tcp_offset": [float(v) for v in fixed[:3, 3]],
-        "tcp_rpy": [float(v) for v in Rotation.from_matrix(fixed[:3, :3]).as_euler("xyz")],
-    }
-
-
 def build_models_from_urdf(urdf_xml, base_frame="waist_yaw_link", logger=None):
-    """Build both arm models from the supplied robot_description URDF."""
-    from arm_ik.kinematics import arm_from_dict
-    if not urdf_xml:
-        return {}
+    """Compatibility wrapper around the canonical URDF parser."""
+    from arm_ik.urdf_model import build_arm_model
     models = {}
     for side in ("left", "right"):
-        cfg = build_side_config_from_urdf(urdf_xml, base_frame, side)
-        if cfg is not None:
-            models[side] = arm_from_dict(cfg)
-            if logger is not None:
-                logger.info(f"[{side}] 7-DOF модель из URDF; TCP={cfg['tip_link']}; base={base_frame}")
+        try:
+            models[side] = build_arm_model(
+                urdf_xml, side, base_link=base_frame)
+        except ValueError as exc:
+            if "no path from" in str(exc) or "no known" in str(exc):
+                continue
+            raise
+        if logger is not None:
+            logger.info("[%s] 7-DOF model loaded from URDF; base=%s" %
+                        (side, base_frame))
     return models
 
 
 # ---------------------------------------------------------------------------
 # Пределы суставов
 # ---------------------------------------------------------------------------
-
-_DOC_LIMITS = {
-    # (lower, upper) по документации docs/INTERFACES.md, рад — встроенный
-    # запасной источник лимитов (файлы не читаются).
-    "shoulder_pitch": (-2.97, 2.97),
-    "shoulder_roll_L": (-0.26, 2.62),
-    "shoulder_roll_R": (-2.62, 0.26),
-    "shoulder_yaw": (-2.97, 2.97),
-    "elbow_pitch": (-2.62, 0.26),
-    "elbow_yaw": (-2.97, 2.97),
-    "wrist_pitch": (-0.79, 1.05),
-    "wrist_roll_L": (-1.66, 1.31),
-    "wrist_roll_R": (-1.31, 1.66),
-}
-
 
 def limits_from_urdf(urdf_xml):
     """{joint_name: (lower, upper)} из строки /robot_description (xml.etree,
@@ -432,78 +193,21 @@ def limits_from_urdf(urdf_xml):
     return out
 
 
-def fallback_limits():
-    """Встроенные типовые пределы обеих рук (docs/INTERFACES.md); используется,
-    когда /robot_description не публикуется. Файлы-конфиги не читаются."""
-    out = {}
-    for _i, kw in enumerate(KEYWORDS):
-        for tag, side in (("l", "left"), ("r", "right")):
-            key = kw + ("_L" if side == "left" else "_R") \
-                if (kw + "_L") in _DOC_LIMITS else kw
-            lo, up = _DOC_LIMITS.get(key, (-math.pi, math.pi))
-            out[f"{kw}_{tag}_joint"] = (lo, up)
-    return out
-
-
-def apply_limits(cfg, limits):
-    for jd in cfg["joints"]:
-        if jd["name"] in limits:
-            lo, up = limits[jd["name"]]
-            jd["limits"] = [float(lo), float(up)]
-
-
-# ---------------------------------------------------------------------------
-# Главный вход
-# ---------------------------------------------------------------------------
-
 def build_models_from_tf(static_msgs, dynamic_msgs, joint_names, base_frame,
                          urdf_xml=None, tip_hints=None, tcp_offsets=None,
                          logger=None):
-    """Сообщения /tf + /tf_static -> {'left': ArmModel, 'right': ArmModel}.
+    """Deprecated compatibility entry point.
 
-    Возвращает dict (возможно неполый — нода сама решает, хватит ли одного
-    комплекта или нужен fallback на файл). Пустой dict — если в дереве нет
-    ни одной руки.
+    Joint axes cannot be recovered from current TF transforms. Use a URDF
+    description; TF-only reconstruction is rejected rather than returning a
+    plausible-looking but physically incorrect arm model.
     """
-    from arm_ik.kinematics import arm_from_dict
-
-    def log(level, text):
-        if logger is not None:
-            getattr(logger, level)(text)
-
-    if urdf_xml:
-        try:
-            models = build_models_from_urdf(urdf_xml, base_frame, logger)
-            if len(models) == 2:
-                return models
-            log("warn", f"URDF chain unavailable for base={base_frame}; trying TF fallback")
-        except Exception as exc:
-            log("error", f"URDF parsing failed: {exc}")
-    edges = tf_edges(list(static_msgs or []) + list(dynamic_msgs or []))
-    if not edges:
-        log("warn", "TF-дерево пустое (/tf, /tf_static) — модель не собрана")
-        return {}
-    constants = tf_constants(dynamic_msgs, static_msgs)
-
-    # имена суставов: из /joint_states + все подходящие stems активных рёбер
-    names = set(joint_names or [])
-    for p, c in edges:
-        if is_arm_joint(c):
-            names.add(c.replace("_link", "_joint")
-                      if c.endswith("_link") else c)
-    limits = limits_from_urdf(urdf_xml) or fallback_limits()
-
-    out = {}
-    for side in ("left", "right"):
-        cfg = build_side_config(edges, constants, sorted(names), base_frame,
-                                side, tip_hint=(tip_hints or {}).get(side))
-        if cfg is None:
-            log("warn", f"[{side}] цепочка руки в дереве TF не найдена")
-            continue
-        apply_limits(cfg, limits)
-        if tcp_offsets and side in tcp_offsets:
-            cfg["tcp_offset"] = list(tcp_offsets[side])
-        out[side] = arm_from_dict(cfg)
-        log("info", f"[{side}] IK-цепочка из TF: {len(cfg['joints'])} звеньев, "
-                    f"tip={cfg['tip_link']}, base={base_frame}")
-    return out
+    if not urdf_xml:
+        raise ValueError(
+            "TF-only arm model reconstruction is unsafe: provide the URDF XML "
+            "through urdf_xml or use arm_ik.urdf_model.build_models_from_urdf")
+    from arm_ik.urdf_model import build_models_from_urdf
+    models = build_models_from_urdf(urdf_xml, base_link=base_frame)
+    if logger is not None:
+        logger.info("Built arm models from URDF; TF data is not used for joint axes")
+    return models

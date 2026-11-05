@@ -127,9 +127,10 @@ ros2 launch arm_ik arm_ik.launch.py demo_delta:=true delta_side:=right delta_x:=
   independently verified on the target robot.
 - Without `bodyctrl_msgs`, the node computes IK but does not publish motor
   commands; this is a dry-run.
-- The table guard is a plane approximation, not full self-collision or
-  environment collision checking. It is disabled by default and must be
-  calibrated before enabling.
+- The table guard is a plane approximation with a conservative 5 cm link radius,
+  not full self-collision or environment collision checking. It is disabled by
+  default; when enabled, `base_frame` and `kinematics_base_frame` must match and
+  table height/dimensions must be calibrated in that frame.
 - Numerical IK can reject unreachable or poorly conditioned targets. For absolute
   goals only, an unreachable orientation may be relaxed while preserving the
   position target.

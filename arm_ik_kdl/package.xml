@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>arm_ik_kdl</name>
+  <version>0.1.0</version>
+  <description>ROS 2 Humble KDL inverse kinematics server for the TienKung 2.0 Pro 7-DOF arms.</description>
+  <maintainer email="maintainer@example.com">almost_terminator contributors</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>kdl_parser</depend>
+  <depend>orocos_kdl</depend>
+  <depend>urdf</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

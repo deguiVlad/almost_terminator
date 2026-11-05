@@ -15,6 +15,8 @@
 MoveIt / `moveit_msgs/srv/CheckCollisionFine`, но для плоского стола
 аналитического теста достаточно и он работает на 50 Гц без нагрузки на CPU.
 """
+import math
+
 from arm_ik._math_compat import np
 
 from .kinematics import chain_transforms
@@ -33,7 +35,7 @@ class TableGuard:
     def penetration(self, p):
         """Глубина проникновения точки под стол (0 если всё ок)."""
         if self.inside_xy(p):
-            d = (self.h - self.margin) - p[2]
+            d = (self.h + self.margin) - p[2]
             return max(0.0, d)
         return 0.0
 
@@ -43,7 +45,15 @@ class TableGuard:
         pts = [np.zeros(3)] + [T[:3, 3] for T in Ts]
         tcp = (Ts[-1] @ np.append(model.tcp_offset, 1.0))[:3]
         pts.append(tcp)
-        for p in pts:
+        # Проверяем сегменты, а не только концы: звено может пересечь стол
+        # между двумя безопасными по высоте суставными точками.
+        samples = []
+        for a, b in zip(pts[:-1], pts[1:]):
+            length = float(np.linalg.norm(b - a))
+            count = max(1, int(math.ceil(length / 0.02)))
+            for k in range(count + 1):
+                samples.append(a + (b - a) * (float(k) / count))
+        for p in samples:
             if self.penetration(p - np.array([0, 0, link_radius])) > 0:
                 return True
         return False

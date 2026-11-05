@@ -657,7 +657,7 @@ class ArmIKNode(Node):
                     if path_clear:
                         ex.traj = candidate
                         ex.idx, ex.state, ex.fine_cycles = 0, ArmExecutor.TRAJ, 0
-                        ex.last_T_des = T_des.copy()
+                        ex.last_T_des = np.linalg.inv(T_model_base) @ T_des_model
                         self.get_logger().info(
                             f"[{side}] IK через поднятый waypoint ({len(ex.traj)} точек)")
                         return True

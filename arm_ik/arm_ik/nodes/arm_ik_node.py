@@ -222,6 +222,22 @@ class ArmIKNode(Node):
         self.delta_max_rot = float(self.get_parameter("delta_max_rot").value)
         self.delta_rotation_frame = str(self.get_parameter("delta_rotation_frame").value).lower()
 
+        positive_parameters = {
+            "rate_hz": self.rate_hz, "spd_limit": self.spd,
+            "a_max": self.a_max, "tol_pos": self.tol_pos,
+            "tol_rot": self.tol_rot, "delta_max_lin": self.delta_max_lin,
+            "delta_max_rot": self.delta_max_rot,
+        }
+        for name, value in positive_parameters.items():
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError("%s must be finite and greater than zero" % name)
+        if self.fine_max < 1 or self.n_seeds < 1:
+            raise ValueError("fine_max_cycles and n_seeds must be >= 1")
+        if self.delta_ref not in ("measured", "last_goal"):
+            raise ValueError("delta_reference must be 'measured' or 'last_goal'")
+        if self.delta_rotation_frame not in ("base", "tcp"):
+            raise ValueError("delta_rotation_frame must be 'base' or 'tcp'")
+
         # ---------------- состояние ----------------
         self.joints = {}
         self._urdf_xml = None
@@ -296,8 +312,10 @@ class ArmIKNode(Node):
                 for s in self._demo_sides()}
             self.get_logger().info("demo_delta ON -> публикация TwistStamped смещений")
         if self.demo_goal_pubs or self.demo_delta_pubs:
-            self.demo_timer = self.create_timer(
-                float(self.get_parameter("demo_period").value), self.demo_tick)
+            demo_period = float(self.get_parameter("demo_period").value)
+            if not math.isfinite(demo_period) or demo_period <= 0.0:
+                raise ValueError("demo_period must be finite and greater than zero")
+            self.demo_timer = self.create_timer(demo_period, self.demo_tick)
 
         self.get_logger().info(
             f"arm_ik_node ready | tips={[m.tip_link for m in self.models.values()]} | "
@@ -431,7 +449,11 @@ class ArmIKNode(Node):
 
     def _demo_sides(self):
         side = str(self.get_parameter("demo_side").value)
-        return ["left", "right"] if side == "both" else [side]
+        if side == "both":
+            return ["left", "right"]
+        if side in ("left", "right"):
+            return [side]
+        raise ValueError("demo_side must be 'left', 'right' or 'both'")
 
     def demo_tick(self):
         """Периодическая публикация демо-целей/дельт (внутренний таймер ноды)."""
@@ -439,7 +461,7 @@ class ArmIKNode(Node):
         now = self.get_clock().now().to_msg()
         if self.demo_goal_pubs:
             yaw = math.radians(g("demo_yaw_deg"))
-            q = Rotation.from_euler("xyz", [yaw, 0.0, 0.0]).as_quat()
+            q = Rotation.from_euler("xyz", [0.0, 0.0, yaw]).as_quat()
             ys = {"left": g("demo_y_l"), "right": g("demo_y_r")}
             for s, pub in self.demo_goal_pubs.items():
                 ps = PoseStamped()

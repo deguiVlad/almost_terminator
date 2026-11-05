@@ -475,9 +475,15 @@ class ArmIKNode(Node):
             return
         # Treat each JointState as a complete snapshot; do not silently mix
         # fresh values with stale joints from earlier partial messages.
+        was_stale = self._joint_state_stale_warned
         self.joints = values
         self._last_joint_state_time = self.get_clock().now()
         self._joint_state_stale_warned = False
+        if was_stale and self._models_ready:
+            for side, model in self.models.items():
+                if all(name in values for name in model.names):
+                    self.exec[side].hold_q = np.asarray(
+                        [values[name] for name in model.names], dtype=float)
 
     def q_meas(self, model):
         missing = [name for name in model.names if name not in self.joints]

@@ -214,8 +214,9 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
     pos_rows = [i for i in active if i < 3]
     rot_rows = [i for i in active if i >= 3]
     task_weights = np.asarray(task_weights, dtype=float)
-    if (task_weights.shape != (2,) or np.any(~np.isfinite(task_weights))
-            or np.any(task_weights <= 0.0)):
+    if (task_weights.shape != (2,) or
+            not all(math.isfinite(float(v)) and float(v) > 0.0
+                    for v in task_weights)):
         raise ValueError("task_weights must be two positive values: (position, rotation)")
     full_scale = [float(task_weights[0])] * 3 + [float(task_weights[1])] * 3
     active_scale = [full_scale[i] for i in active]

@@ -185,7 +185,7 @@ def test_delta_goal_reachable_by_ik(model):
 
 def test_arm_from_dict_roundtrip(model):
     """arm_from_dict — единственный внутренний способ собрать ArmModel
-    (его использует tree_from_tf); файловых загрузчиков в пакете нет."""
+    (его использует urdf_model); файловых загрузчиков в пакете нет."""
     from arm_ik.kinematics import arm_from_dict
     data = {"side": model.side, "tip_link": model.tip_link,
             "base_frame": model.base_frame,

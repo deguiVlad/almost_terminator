@@ -51,12 +51,10 @@
 import json
 import math
 import time
-from pathlib import Path
 
 from arm_ik._math_compat import np
 import rclpy
 from geometry_msgs.msg import PoseStamped, TwistStamped
-from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 from arm_ik._math_compat import Rotation
 from sensor_msgs.msg import JointState
@@ -72,19 +70,11 @@ except ImportError:  # graceful degradation: нода стартует и счи
     CmdSetMotorPosition = None
     SetMotorPosition = None
 
-from arm_ik.kinematics import (fk, fk_tcp, geometric_jacobian, ik_dls,
-                               ik_multi_seed, clip_to_limits, make_default_arm,
-                               pose_error, delta_to_T, pose_to_T as mat_from_posquat,
-                               _tmat)
+from arm_ik.kinematics import (fk, geometric_jacobian, ik_multi_seed,
+                               clip_to_limits, make_default_arm, pose_error,
+                               delta_to_T)
 from arm_ik.collision import TableGuard
 from arm_ik.trajectory import joint_space_profile
-
-try:  # srv-кодген включается только если пакет собран с rosidl (см. README)
-    from arm_ik.srv import SolveIK
-    HAVE_SRV = True
-except ImportError:
-    HAVE_SRV = False
-
 
 def pose_to_T(msg_pose):
     p = msg_pose.position
@@ -292,9 +282,6 @@ class ArmIKNode(Node):
         # первая попытка построить дерево — сразу, далее по таймеру step
         self.try_build_tree_from_tf()
 
-        cbg = ReentrantCallbackGroup()
-        if HAVE_SRV:
-            self.create_service(SolveIK, "~/solve", self.solve_srv, callback_group=cbg)
         self.timer = self.create_timer(1.0 / self.rate_hz, self.step)
 
         # ---------------- встроенные демо-паблишеры ----------------
@@ -321,7 +308,7 @@ class ArmIKNode(Node):
             f"arm_ik_node ready | tips={[m.tip_link for m in self.models.values()]} | "
             f"tree=/tf+tf_static{' (ждём дерево)' if not self._tf_models_ready else ' (получено)'} | "
             f"guard={'ON h=%.2f' % self.guard.h if self.guard else 'OFF'} | "
-            f"srv={'on' if HAVE_SRV else 'off (нет сгенерированного arm_ik.srv)'}")
+            "service=disabled (ament_python package does not generate custom srv)")
 
     # ------------------------------------------------------------ дерево из TF
     def _check_sim_clock(self):
@@ -819,21 +806,6 @@ class ArmIKNode(Node):
             f"dr=({drot[0]:+.3f},{drot[1]:+.3f},{drot[2]:+.3f}) рад "
             f"[ref={'last_goal' if use_last else 'measured'}, rot_frame={self.delta_rotation_frame}]")
         self.set_goal(side, T_des, position_only=(nl > 1e-9 and nr < 1e-9))
-
-    # ------------------------------------------------------------ service
-    def solve_srv(self, req, res):
-        side = req.side if req.side in ("left", "right") else "right"
-        model = self.models[side]
-        T_des = pose_to_T(req.goal.pose)
-        q_init = np.zeros(7) if req.use_zero_seed else self.q_meas(model)
-        T_des = self._lookup_T(self.kinematics_base_frame, self.base_frame) @ T_des
-        q, ok, hist = ik_dls(model, T_des, q_init, max_iter=250)
-        res.success = bool(ok)
-        res.joint_names = model.names
-        res.positions = [float(v) for v in q]
-        res.motor_ids = [int(i) for i in model.ids]
-        res.final_error = float(hist[-1]) if hist else 1e9
-        return res
 
     # ------------------------------------------------------------ control loop
     def step(self):

@@ -48,6 +48,9 @@ ros2 launch arm_ik arm_ik.launch.py \
   urdf_path:=/absolute/path/to/tiangong2pro.urdf
 ```
 
+Для реального робота wall time используется по умолчанию. В симуляции явно
+включите ROS simulation time: `use_sim_time:=true`.
+
 Либо оставьте `urdf_path` пустым: узел ожидает transient-local топик
 `/robot_description` типа `std_msgs/msg/String`:
 
@@ -143,6 +146,7 @@ ros2 topic pub --once /arm_ik/goal_right geometry_msgs/msg/PoseStamped \
 | Параметр | По умолчанию | Значение |
 |---|---:|---|
 | `urdf_path` | пусто | Путь к URDF; иначе используется `/robot_description` |
+| `use_sim_time` | false | Включать ROS time из `/clock` для симуляции |
 | `base_frame` | `waist_yaw_link` | Система координат целей |
 | `kinematics_base_frame` | `waist_yaw_link` | Корень URDF-цепей |
 | `rate_hz` | 50 | Частота control loop |

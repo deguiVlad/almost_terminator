@@ -50,7 +50,6 @@ def launch_setup(context, *args, **kwargs):
 
     params = {
         "use_sim_time": b("use_sim_time"),
-        "urdf_path": LaunchConfiguration("urdf_path").perform(context),
         "rate_hz": float(LaunchConfiguration("rate_hz").perform(context)),
         "spd_limit": float(LaunchConfiguration("spd_limit").perform(context)),
         "h_table": float(LaunchConfiguration("h_table").perform(context)),
@@ -93,7 +92,7 @@ def generate_launch_description():
         d("tol_pos", "0.01", "допуск достижения цели по позиции, м"),
         d("tol_rot", "0.05", "допуск по ориентации, рад"),
         d("kp", "0.6", "усиление P-коррекции недолёта ПД-приводов"),
-        d("table_guard", "true", "включить защиту от стола"),
+        d("table_guard", "false", "включить защиту от стола после калибровки"),
         d("tcp_offset", "", "legacy: переопределение смещения TCP"),
         d("urdf_path", "", "путь к tiangong_pro_with_hands.urdf (пусто — /robot_description)"),
         d("kinematics_base_frame", "waist_yaw_link", "база URDF-цепочки обеих рук"),

@@ -56,3 +56,44 @@ def test_model_prefers_robot_tcp_link_names():
     model = build_arm_model(xml, "left", base_link="waist_yaw_link")
     assert model.tip_link == "left_tcp_link"
     assert len(model.joints) == 7
+
+
+
+def test_full_two_arm_urdf_builds_both_tienkung_chains():
+    from arm_ik.urdf_model import build_models_from_urdf
+
+    tags = ("l", "r")
+    xml = ['<robot name="two_arms"><link name="waist_yaw_link"/>']
+    names = ("shoulder_pitch", "shoulder_roll", "shoulder_yaw",
+             "elbow_pitch", "elbow_yaw", "wrist_pitch", "wrist_roll")
+    axes = ("0 1 0", "1 0 0", "0 0 1", "0 1 0",
+            "0 0 1", "0 1 0", "1 0 0")
+    for tag in tags:
+        parent = "waist_yaw_link"
+        for index, (name, axis) in enumerate(zip(names, axes), 1):
+            child = f"{tag}_link_{index}"
+            xml.append(f'<link name="{child}"/>')
+            xml.append(
+                f'<joint name="{name}_{tag}_joint" type="revolute">'
+                f'<parent link="{parent}"/><child link="{child}"/>'
+                f'<origin xyz="0 0 0.1" rpy="0 0 0"/>'
+                f'<axis xyz="{axis}"/>'
+                f'<limit lower="-1.0" upper="1.0" effort="10" velocity="2"/>'
+                f'</joint>')
+            parent = child
+        tip = "left_tcp_link" if tag == "l" else "right_tcp_link"
+        xml.append(f'<link name="{tip}"/>')
+        xml.append(
+            f'<joint name="{tag}_tcp_fixed" type="fixed">'
+            f'<parent link="{parent}"/><child link="{tip}"/>'
+            f'<origin xyz="0.05 0 0" rpy="0 0 0"/></joint>')
+    xml.append("</robot>")
+
+    models = build_models_from_urdf("".join(xml), "waist_yaw_link")
+    assert set(models) == {"left", "right"}
+    assert models["left"].names == [f"{name}_l_joint" for name in names]
+    assert models["right"].names == [f"{name}_r_joint" for name in names]
+    assert models["left"].ids == list(range(11, 18))
+    assert models["right"].ids == list(range(21, 28))
+    assert models["left"].tip_link == "left_tcp_link"
+    assert models["right"].tip_link == "right_tcp_link"

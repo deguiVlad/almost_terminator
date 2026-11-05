@@ -1,365 +1,204 @@
-# arm_ik — обратная кинематика обеих рук TienKung 2.0 Pro (ROS 2, Humble)
+# arm_ik — обратная кинематика двух рук TienKung 2.0 Pro
 
-Пакет решает задачу: **вывести TCP (виртуальный кончик) каждой из двух 7-DOF рук
-робота в заданную точку с заданной ориентацией относительно корпуса**, соблюдая
-пределы суставов из URDF, лимит скорости моторов ≤ 0.8 рад/с и не задевая стол.
-Команды уходят штатными топиками реального робота (`/arm/cmd_pos`), точность
-достигается замыканием контура по `/joint_states`.
+ROS 2 Humble Python-пакет для двух 7-DOF рук. Кинематическая модель и пределы
+суставов читаются из URDF. Узел решает IK для TCP кисти, строит ограниченную по
+скорости траекторию и публикует команды моторов через `bodyctrl_msgs`.
 
-```
-docs (PoseStamped | TwistStamped)            /joint_states
-        │                                          │
-        ▼                                          ▼
-  on_goal / on_delta ──► цель T_des (4×4 в waist_yaw_link) ──► IK (DLS, multi-seed,
-        барьер стола, clip по limits)  ──► q_sol ──► траектория (trapezoid,
-        ≤0.8 рад/с, валидация коллизий) ──► /arm/cmd_pos (50 Гц) ──► приводы
-                                        ▲
-        фаза fine: dq = J⁺·Kp·e по энкодерам (недолёт ПД до 15 %) ─┘
-```
+> **Важно:** перед реальным движением проверьте URDF, motor ID mapping, направления
+> осей, единицы и ограничения на стенде без нагрузки. Встроенная проверка стола
+> является упрощённой геометрической защитой, а не заменой MoveIt/FCL и
+> полноценной проверки коллизий. Не подключайте выход к приводам до проверки.
 
-Версии и список изменений — в [CHANGELOG.md](CHANGELOG.md).
+## 1. Требования
 
----
+- Ubuntu 22.04 и ROS 2 Humble;
+- `rclpy`, `tf2_ros`, `geometry_msgs`, `sensor_msgs`, `std_msgs`;
+- `bodyctrl_msgs` из окружения робота для публикации `/arm/cmd_pos`;
+- `numpy` и `scipy` рекомендуются. Для математического ядра есть pure-Python
+  fallback, но ROS 2 и драйвер сообщений всё равно должны быть установлены.
 
-## 0. Быстрый старт (правильный порядок команд)
+## 2. Сборка
+
+Из корня ROS workspace:
 
 ```bash
-# 0) окружение ROS + домен хакатона (или используйте hackathon/tools/ros.sh)
 source /opt/ros/humble/setup.bash
-export ROS_DOMAIN_ID=146
-
-# 1) workspace, в котором лежит пакет arm_ik (у нас это ~/nssr-polygon/hackathon/ros2)
-cd ~/nssr-polygon/hackathon/ros2
-
-# 2) чистая пересборка пакета (обязательно после обновления исходников!)
-rm -rf build/arm_ik install/arm_ik log/build_arm_ik*
-colcon build --packages-select arm_ik --symlink-install
-source install/setup.bash          # source ПОСЛЕДНИМ, чтобы он имел приоритет
-
-# 3) проверка установки
-ros2 pkg prefix arm_ik             # должен показать .../hackathon/ros2/install/arm_ik
-ros2 pkg executables arm_ik        # arm_ik, demo_goal, demo_delta (+ run_*.py в lib/)
-
-# 4) URDF автоматически читается из /robot_description или из параметра urdf_path; export arms.json не требуется.
-
-# 5) запуск IK-сервера (постоянная нода, ждёт цели на топиках)
-ros2 launch arm_ik arm_ik.launch.py
-
-# 6) в другом терминале — цель (абсолютная поза или смещение, см. §5)
-ros2 topic pub -1 /arm_ik/goal_right geometry_msgs/msg/PoseStamped \
-  "{header:{frame_id:pelvis}, pose:{position:{x:0.45,y:-0.2,z:1.0}, orientation:{w:1}}}"
-```
-
-Если нет времени на сборку — запуск вообще без colcon (§3, вариант «из исходников»).
-
-## 1. Окружение и типичные грабли с путями
-
-Контейнер симулятора сам использует оверлей `/nssr_sim/install/setup.bash`, в
-котором живёт **старая** копия `arm_ik`. Python и ROS берут пакет из того
-оверлея, который отsource'нут последним / имеет приоритет в `AMENT_PREFIX_PATH`.
-
-Правила:
-
-* `source` делайте в порядке: сначала `/nssr_sim/install/setup.bash` (нужен для
-  `bodyctrl_msgs`), **последним** — свой workspace: `~/nssr-polygon/hackathon/ros2/install/setup.bash`;
-* проверяйте конфликт одной командой:
-  ```bash
-  ros2 pkg prefix arm_ik      # где ROS видит пакет
-  python3 -c "import arm_ik; print(arm_ik.__file__)"   # какой модуль импортируется
-  ```
-  оба пути должны вести в ваш свежий workspace (для второй команды — из его корня);
-* если в логах запуска появляется путь `/nssr_sim/install/arm_ik/...` — вы
-  source'ите старый оверлей: пересоберите пакет в нём
-  (`cd /nssr_sim && rm -rf build/arm_ik install/arm_ik && colcon build --packages-select arm_ik`)
-  или поменяйте порядок `source`;
-* venv/conda ломает доступ к `rclpy` (он только в системном `/usr/bin/python3`):
-  `deactivate` перед запуском. Сам bootstrap при отсутствии rclpy умеет
-  перезапускаться под `/usr/bin/python3` автоматически.
-
-## 2. Структура пакета
-
-| Файл | Роль |
-|---|---|
-| `arm_ik/kinematics.py` | Математическое ядро (без ROS): цепочка JointSpec/ArmModel, FK, геометрический Якобиан 6×7, ошибка позы, IK DLS (Levenberg–Marquardt) с пределами/barrier/null-space, multi-seed, `delta_to_T` для смещений. |
-| `arm_ik/collision.py` | `TableGuard`: стол как полуплоскость; клампинг цели, мягкий барьерный градиент внутрь IK, жёсткая проверка точек траектории. |
-| `arm_ik/trajectory.py` | `joint_space_profile`: трапециевидный профиль в пространстве суставов с гарантией \|dq/dt\| ≤ v_max. |
-| `arm_ik/nodes/arm_ik_node.py` | ROS 2 узел (код ноды!): топики целей (абсолютные и delta), сервис `~/solve`, цикл исполнения 50 Гц, фазы traj→fine→reached, телеметрия. |
-| `arm_ik/nodes/demo_goal_publisher.py` | Демо абсолютных целей (PoseStamped). |
-| `arm_ik/nodes/demo_delta_publisher.py` | Демо шестимерных смещений (TwistStamped). |
-| `bin/run_arm_ik.py`, `bin/run_demo_goal.py`, `bin/run_demo_delta.py` | Standalone-запускалки. Имена намеренно НЕ совпадают с именами модулей — это исключает circular import. Работают из исходников и из `install/.../lib/arm_ik/`. |
-| `bin/_bootstrap.py` | Единый bootstrap: поиск пакета-исходников, чистка sys.path от битых старых сборок, перезапуск под python с rclpy, человекочитаемые ошибки вместо трейсбеков. |
-| `scripts/export_kinematics_from_urdf.py` | Извлекает точные origin/axis/limits обеих рук из URDF → `config/arms.json`. |
-| `config/arms_template.json` | Шаблон модели (топология tiangong_pro + пределы из docs); заменить файлом из URDF! |
-| `launch/arm_ik.launch.py` | Запуск сервера (+опционально демо); сам находит исполняемый (исходники → entry_point → libexec). |
-| `srv/SolveIK.srv` | Сервис «решить IK без движения» (см. §7 про сборку srv). |
-| `test/test_kinematics.py` | 11 офлайн-тестов ядра (FK/Якобиан/IK/траектория/стол/delta). |
-| `pytest.ini` | Отключает сторонний плагин libtmux (ломает pytest≥9). |
-
-## 3. Установка, сборка, запуск
-
-### 3.1 Нормальный путь (colcon)
-
-```bash
-cd <ws>                       # workspace, где лежит папка arm_ik (как пакет, не в src/ тоже ок)
-rm -rf build/arm_ik install/arm_ik log/build_arm_ik*
+rosdep install --from-paths src --ignore-src -r -y
 colcon build --packages-select arm_ik --symlink-install
 source install/setup.bash
-ros2 pkg executables arm_ik   # arm_ik / demo_goal / demo_delta
 ```
 
-Запуск (нода — постоянный сервер, см. §8):
-
-```bash
-ros2 launch arm_ik arm_ik.launch.py
-ros2 run arm_ik arm_ik --ros-args -p use_sim_time:=true -p h_table:=0.9   # эквивалент
-```
-
-### 3.2 Без сборки — напрямую из исходников пакета
-
-```bash
-source /opt/ros/humble/setup.bash && export ROS_DOMAIN_ID=146
-cd <путь>/arm_ik
-chmod +x bin/*.py
-./bin/run_arm_ik.py --ros-args -p use_sim_time:=true -p h_table:=0.9 &
-```
-
-`_bootstrap.py` сам подключит пакет к `sys.path`, найдёт python с `rclpy` и
-даст понятную ошибку, если окружение не ready.
-
-### 3.3 Разбор ошибок запуска (все три уже исправлены в пакете)
-
-| Симптом | Причина | Лечение |
-|---|---|---|
-| `libexec directory '.../lib/arm_ik' does not exist` | пакет собран до появления скриптов/entry_points, либо старый `install/` | `rm -rf build/arm_ik install/arm_ik && colcon build --packages-select arm_ik --symlink-install && source install/setup.bash` |
-| `ImportError: cannot import name 'main' from partially initialized module 'arm_ik.arm_ik_node' (circular import)` | старая обёртка `lib/arm_ik/arm_ik_node.py` имела то же имя, что модуль, и подменяла его в `sys.modules`. В текущей версии имена разведены (`run_arm_ik.py` ↔ `arm_ik/nodes/arm_ik_node.py`) | удалить СТАРЫЕ артефакты во всех workspace, где собирался пакет: `rm -rf /nssr_sim/{build,install}/arm_ik <ваш_ws>/{build,install}/arm_ik`, затем пересобрать и перезейтить; проверить: `head -8 $(which ...)/install/arm_ik/lib/arm_ik/run_arm_ik.py` и `ros2 pkg prefix arm_ik` |
-| `ModuleNotFoundError: No module named 'rclpy'` | запуск из venv/conda или python без системных пакетов ROS | `deactivate`; `source /opt/ros/humble/setup.bash`; либо запускать `./bin/run_arm_ik.py` (bootstrap перезапустится под `/usr/bin/python3`). Проверка: `/usr/bin/python3 -c "import rclpy; print('ok')"` |
-| Собрано в одном ws, а launch берёт пакет из другого (`/nssr_sim`) | приоритет оверлеев в `AMENT_PREFIX_PATH` | source'ть свой `install/setup.bash` последним; контроль — `ros2 pkg prefix arm_ik`. Полная зачистка: `rm -rf /nssr_sim/{build,install}/arm_ik <ws>/{build,install}/arm_ik` |
-| `arm_ik: не хватает numpy/scipy` | python с rclpy (например, venv без system-site-packages или другой интерпретатор) не видит научные пакеты | bootstrap сам ищет python, где есть `rclpy+numpy+scipy`, и перезапускается под ним; если такой не найден — печатает точную команду для конкретного интерпретатора. Ручное лечение: `/usr/bin/python3 -m pip install numpy scipy` или `sudo apt install python3-numpy python3-scipy`; можно явно указать python: `ARM_IK_PYTHON=/usr/bin/python3 ./bin/run_arm_ik.py ...` |
-| `python3 -c "from arm_ik.nodes..."` → ModuleNotFoundError | команда запущена вне workspace без `source install/setup.bash` | это нормально: после `source install/setup.bash` импорт работает; standalone-скрипты собирают путь сами |
-
-Диагностика одним блоком:
+Проверить установленный исполняемый файл:
 
 ```bash
 ros2 pkg prefix arm_ik
-ls install/arm_ik/lib/arm_ik/
-grep -n "import" install/arm_ik/lib/arm_ik/run_arm_ik.py
-python3 -c "import arm_ik, arm_ik.nodes.arm_ik_node as m; print(m.__file__)"
+ros2 pkg executables arm_ik
 ```
 
-## 4. Модель руки из URDF (автоматически)
+Пакет устанавливает исполняемый файл `run_arm_ik.py`. Вызов `ros2 run arm_ik arm_ik`
+не предусмотрен.
 
-Нода строит кинематические модели обеих рук непосредственно из полного URDF
-`tiangong_pro_with_hands.urdf`. Геометрия, оси и пределы берутся из joint/origin,
-joint/axis и joint/limit; фиксированные соединения после запястья также учитываются
-в TCP-позе, включая поворот hand frame.
+## 3. Запуск
 
-По умолчанию читается файл:
-```bash
-/home/user/nssr-polygon/assets/robots/tiangong_pro/tiangong_pro_with_hands.urdf
-```
-
-Путь можно переопределить параметром `urdf_path`. Если файл недоступен, нода
-использует transient-local топик `/robot_description`. Модель строится от
-`waist_yaw_link` до `L_base_link` / `R_base_link`, по 7 суставов на руку.
-Публикация целей блокируется до загрузки модели и получения всех семи суставов
-выбранной руки из `/joint_states`.
-
-Пример запуска с другим путём:
-```bash
-ros2 launch arm_ik arm_ik.launch.py urdf_path:=/path/to/tiangong_pro_with_hands.urdf
-```
-
-TableGuard по умолчанию выключен: параметры `h_table`, `table_x0/x1` и
-`table_y_half` нужно откалибровать именно в `waist_yaw_link`, а не в прежней
-системе `pelvis`. Включайте `enable_table_guard:=true` только после калибровки.
-
-## 5. Интерфейсы узла
-
-### 5.1 Абсолютная поза: `geometry_msgs/PoseStamped` на `/arm_ik/goal_left|goal_right`
-
-Шестимерное положение TCP кисти. `header.frame_id` — любая рамка дерева TF
-(узел перенесёт в `waist_yaw_link` через TF2); пустая/`waist_yaw_link` — уже в базовой рамке IK.
-Ориентация — кватернион `pose.orientation`.
+Сначала запустите robot_state_publisher и источник `/joint_states`. URDF можно
+передать параметром `urdf_path`:
 
 ```bash
-ros2 topic pub -1 /arm_ik/goal_right geometry_msgs/msg/PoseStamped "{
-  header: {frame_id: pelvis},
-  pose: {position: {x: 0.45, y: -0.25, z: 1.0},
-         orientation: {x: 0.7071, y: 0.0, z: 0.0, w: 0.7071}}}"
+ros2 launch arm_ik arm_ik.launch.py \
+  urdf_path:=/absolute/path/to/tiangong2pro.urdf
 ```
 
-### 5.2 Смещение: `geometry_msgs/TwistStamped` на `/arm_ik/delta_left|delta_right`
+Либо оставьте `urdf_path` пустым: узел ожидает transient-local топик
+`/robot_description` типа `std_msgs/msg/String`:
 
-Шестимерное **относительное** смещение текущей позы TCP:
-* `twist.linear.{x,y,z}` — dxyz в метрах в рамке `header.frame_id` (при публикации в иной TF-рамке узел преобразует вектор в `waist_yaw_link`);
-* `twist.angular.{x,y,z}` — rotation vector (ось × угол, радианы); оси вращения выбираются `delta_rotation_frame:=base|tcp`. `base` — оси корпуса, `tcp` — собственные оси кисти.
+```bash
+ros2 launch arm_ik arm_ik.launch.py urdf_path:=""
+```
 
-Цель вычисляется как `T_new = Δ · T_ref`:
-`p_new = p_ref + dpos`, `R_new = Rot(drot) · R_ref`.
+В модели должны существовать цепи от `waist_yaw_link` до `left_tcp_link` и
+`right_tcp_link`, каждая с семью вращательными суставами в порядке:
 
-Что такое `T_ref` — выбирается параметром **`delta_reference`**:
+1. `shoulder_pitch_{l,r}_joint`
+2. `shoulder_roll_{l,r}_joint`
+3. `shoulder_yaw_{l,r}_joint`
+4. `elbow_pitch_{l,r}_joint`
+5. `elbow_yaw_{l,r}_joint`
+6. `wrist_pitch_{l,r}_joint`
+7. `wrist_roll_{l,r}_joint`
 
-| значение | смысл | поведение при повторе той же дельты |
+Модель строится только из URDF: TF не содержит сведений об исходных осях и
+пределах суставов, поэтому TF-only построение исполнительной модели отключено.
+TF2 используется для преобразования входных целевых поз между системами координат.
+
+## 4. ROS интерфейсы
+
+### Абсолютная цель
+
+- `/arm_ik/goal_left`
+- `/arm_ik/goal_right`
+- тип: `geometry_msgs/msg/PoseStamped`
+
+Поза TCP (метры + quaternion). `header.frame_id` должен существовать в TF.
+Если timestamp ненулевой, преобразование выполняется на соответствующий момент
+времени; нулевой timestamp означает latest transform.
+
+Пример:
+
+```bash
+ros2 topic pub --once /arm_ik/goal_right geometry_msgs/msg/PoseStamped \
+  "{header: {frame_id: waist_yaw_link}, pose: {position: {x: 0.40, y: -0.25, z: 0.95}, orientation: {w: 1.0}}}"
+```
+
+### Относительная цель
+
+- `/arm_ik/delta_left`
+- `/arm_ik/delta_right`
+- тип: `geometry_msgs/msg/TwistStamped`
+
+`twist.linear` — смещение TCP в метрах; `twist.angular` — rotation vector
+(ось × угол, радианы), а не угловая скорость. По умолчанию оба вектора заданы
+в базовой системе координат. При `delta_rotation_frame:=tcp` вектор вращения
+задаётся в локальных осях TCP; для этого режима `header.frame_id` должен быть
+пустым или равным `base_frame`.
+
+Параметр `delta_reference`:
+- `measured` — опорная поза вычисляется по текущим измеренным суставам;
+- `last_goal` — опорная поза берётся из последней принятой цели.
+
+`delta_accumulate` включает накопление последовательных дельт от последней
+цели, пока рука находится в активном или достигнутом состоянии.
+
+### Выходы
+
+| Топик | Тип | Назначение |
 |---|---|---|
-| `measured` (умолч.) | текущая **измеренная** FK-поза TCP по `/joint_states` | «шаговый» режим: каждая публикация двигает ещё на d от фактического положения (удобно для джойстика/телеоперации) |
-| `last_goal` | последняя поставленная цель (абсолютная или delta) | идемпотентно: рука встанет в одну и ту же точку |
+| `/arm/cmd_pos` | `bodyctrl_msgs/msg/CmdSetMotorPosition` | Команды моторным ID 11–17 и 21–27 |
+| `/arm_ik/wrist_left_pose` | `geometry_msgs/msg/PoseStamped` | Измеренная FK-поза левого TCP |
+| `/arm_ik/wrist_right_pose` | `geometry_msgs/msg/PoseStamped` | Измеренная FK-поза правого TCP |
+| `/arm_ik/left/status` | `std_msgs/msg/String` | JSON-состояние левой руки |
+| `/arm_ik/right/status` | `std_msgs/msg/String` | JSON-состояние правой руки |
 
-Дополнительно:
-* **`delta_accumulate:=true` (теперь по умолчанию) — series-режим: дельты суммируются от последней
-  delta-цели серии (каждая новая команда — продолжение движения), пока не
-  пришла абсолютная цель или рука не в `idle/failed`;
-* **`delta_max_lin` (0.35 м) / `delta_max_rot` (1.2 рад)** — предохранители:
-  слишком большая одна дельта отклоняется с предупреждением (защита от опечаток
-  и залипания джойстика; серию больших перемещений делайте маленькими шагами);
-* нулевая дельта игнорируется; чужая `frame_id` в delta не переносится через TF
-  (трактуется как base_frame, пишется warning) — это осознанно: delta имеет
-  смысл только в системе корпуса.
+Если `bodyctrl_msgs` недоступен, узел работает в dry-run: IK и статусы
+рассчитываются, но команды в `/arm/cmd_pos` не публикуются.
 
-После вычисления `T_des` delta-цель проходит **тот же конвейер**, что и
-абсолютная: клампинг выше стола → IK → валидация траектории → исполнение →
-fine-дотягивание. То есть «поднять кисть на 3 см над столом» безопасно даже
-если текущая поза была у самой поверхности.
+## 5. Защита и ограничения
 
-```bash
-# сдвинуть правую кисть на 5 см вперёд и довернуть на 0.2 рад вокруг вертикали
-ros2 topic pub -1 /arm_ik/delta_right geometry_msgs/msg/TwistStamped "{
-  header: {frame_id: pelvis},
-  twist: {linear: {x: 0.05}, angular: {z: 0.2}}}"
+- Жёсткий верхний предел скорости команд — 0.8 рад/с; `spd_limit` может только
+  уменьшить его.
+- `joint_state_timeout` — watchdog свежести обратной связи. При отсутствии
+  или устаревании `/joint_states` публикация команд приостанавливается.
+- `enable_table_guard:=true` включает упрощённую проверку столешницы. Её
+  координаты `h_table`, `table_x0`, `table_x1`, `table_y_half` должны быть
+  откалиброваны относительно `base_frame`.
+- Точки вдоль сегментов звеньев дискретно проверяются с учётом условного радиуса.
+  Меши, корпус, вторая рука и внешние объекты не проверяются.
+- Если прямая суставная траектория пересекает стол, узел пытается построить
+  поднятый waypoint и проверяет обе части маршрута. Если безопасный маршрут
+  не найден, цель отклоняется.
+- IK — численный Damped Least Squares solver. Недостижимые цели отклоняются;
+  гарантии нахождения глобального решения нет.
 
-# демо-«шагоход»: каждые 6 с +5 см вперёд
-ros2 run arm_ik demo_delta --ros-args -p use_sim_time:=true \
-    -p side:=right -p dx:=0.05 -p period:=6.0
-```
+## 6. Параметры запуска
 
-### 5.3 Выходы
+| Параметр | По умолчанию | Значение |
+|---|---:|---|
+| `urdf_path` | пусто | Путь к URDF; иначе используется `/robot_description` |
+| `base_frame` | `waist_yaw_link` | Система координат целей |
+| `kinematics_base_frame` | `waist_yaw_link` | Корень URDF-цепей |
+| `rate_hz` | 50 | Частота control loop |
+| `joint_state_timeout` | 0.5 с | Допустимый возраст обратной связи |
+| `spd_limit` | 0.8 рад/с | Верхняя граница скорости |
+| `a_max` | 0.4 рад/с² | Ускорение профиля |
+| `tol_pos` | 0.01 м | Допуск по позиции |
+| `tol_rot` | 0.05 рад | Допуск по ориентации |
+| `enable_table_guard` | false | Включение проверки стола |
+| `waypoint_lift` | 0.25 м | Высота обходного waypoint |
+| `delta_reference` | `measured` | Опора delta-команд |
+| `delta_accumulate` | true | Накопление delta-команд |
+| `delta_rotation_frame` | `base` | Оси rotation vector: `base` или `tcp` |
 
-| Топик | Тип | Содержимое |
-|---|---|---|
-| `/arm/cmd_pos` | `bodyctrl_msgs/CmdSetMotorPosition` | пачка `SetMotorPosition(name=motor_id, pos, spd≤0.8, cur)` для ID 11..17 / 21..27, 50 Гц |
-| `/arm_ik/wrist_{left,right}_pose` | `PoseStamped` (pelvis) | текущая FK-поза TCP по энкодерам — видно в RViz, полезно верхнему уровню |
-| `/arm_ik/{left,right}/status` | `std_msgs/String` (JSON) | `state: idle|traj|fine|reached|failed`, `err_pos_m`, `err_rot_rad` |
-| `~/solve` | `arm_ik/srv/SolveIK` | решить IK без движения (для планировщика верхнего уровня) |
+Для полного списка параметров и demo-аргументов смотрите
+`launch/arm_ik.launch.py` и объявления параметров в
+`arm_ik/nodes/arm_ik_node.py`.
 
-Для абсолютных целей при недостижимой ориентации включается запасной режим: IK
-пытается достичь позиции без фиксации ориентации и оставляет кисть в реально
-достижимой ориентации. В лог выводится `requested orientation relaxed`.
-Для чистых линейных delta-команд используется position-only задача, чтобы
-не блокировать перемещение лишним ограничением ориентации. Чистые вращения
-по-прежнему решаются как полная поза с фиксированной позицией TCP.
-
-## 6. Как это работает внутри (по этапам)
-
-1. **Постановка цели.** PoseStamped переносится TF2 в `pelvis`; TwistStamped —
-   прибавляется к опорной позе (§5.2). Результат — матрица 4×4 `T_des`.
-2. **Клампинг стола.** Если TCP-точка цели лежит в прямоугольнике стола ниже
-   `h_table + margin`, она поднимается ровно на поверхность+запас
-   (`TableGuard.clamp_target_above_table`).
-3. **IK (Damped Least Squares).** Итеративно: `dq = W Jᵀ (J W Jᵀ + λ²I)⁻¹ e`,
-   где `e` — [Δp; rotvec(R_err)], `J` — геометрический якобиан 6×7 TCP. Каждый
-   шаг: плюс барьерный градиент от стола, минус проекция в нуль-пространстве к
-   предпочтительной позе (использует 7-ю степень свободы, позу не меняет), затем
-   **clip по пределам URDF**. Стартов несколько (текущая измеренная + типовые
-   позы) — перебор лечит локальные минимумы (`ik_multi_seed`).
-4. **Траектория.** Трапециевидный профиль q_now→q_sol, синхронизированный по
-   самой долгой оси, с численной проверкой `\|Δq\|/dt ≤ 0.8` (страховочное
-   растяжение при квантовании). Каждая точка профиля проверяется
-   `collides_with_table`; если прямая траектория задевает стол — автоматический
-   **план Б**: waypoint строго над столом (+`waypoint_lift`), две фазы профиля
-   («заход сверху», приём FOCUS_TRACKING.md).
-5. **Исполнение.** На 50 Гц публикуется очередная точка профиля в `/arm/cmd_pos`.
-6. **Фаза fine (замкнутый контур).** Приводы — ПД с недолётом до 15 %, поэтому
-   после профиля ошибка позы добивается по энкодерам:
-   `dq = Jᵀ(JJᵀ+λ²I)⁻¹ e`, клип ±0.1 рад/цикл (рекомендация docs), Kp≈0.6,
-   пока `err_pos < tol_pos (1 см)` и `err_rot < tol_rot (0.05 рад)` → `reached`.
-   Страховка `fine_max_cycles` не даёт зациклиться.
-7. **Отказ.** Если IK не сошлась (цель вне workspace/в пределах невозможно) —
-   состояние `failed`, рука удерживается, в статусе публикуется остаточная
-   ошибка; узел готов принять следующую цель.
-
-Обе руки — независимые стан-машины в одном узле: общий топик команд, непересекающиеся ID моторов.
-
-## 7. Про сервис `SolveIK`
-
-В чистом `ament_python` rosidl-кодген srv не запускается автоматически. Варианты:
-* не использовать сервис (узел полностью работает от топиков — код защищён
-  `try/except ImportError`);
-* собрать srv в соседнем `ament_cmake` пакете-обёртке и добавить
-  `exec_depend` (пример в комментариях `setup.py` — раскомментировать glob и
-  `generate_messages`);
-* временно заменить сервис на пару стандартных message-топиков.
-
-## 8. Параметры узла (кратко)
-
-| Параметр | Умолч. | Назначение |
-|---|---|---|
-| `rate_hz` | 50 | частота цикла и дискретизация профиля |
-| `spd_limit` | 0.8 | жёсткий потолок скорости (min с документным лимитом) |
-| `a_max` | 0.4 | ускорение профиля, рад/с² |
-| `tol_pos`/`tol_rot` | 0.01/0.05 | критерии достижения, м/рад |
-| `kp`, `fine_max_cycles` | 0.6, 300 | коррекция недолёта |
-| `ik_rotation_weight` | 0.25 | вес ориентации в основном IK; позиция TCP приоритетнее, допуски по позиции/углу проверяются отдельно |
-| `h_table`, `table_x0/x1/y_half/margin` | 0.9, 0.35/1.2/1.0/0.02 | геометрия стола |
-| `enable_table_guard` | false | включить защиту только после калибровки стола относительно waist_yaw_link |
-| `waypoint_lift` | 0.25 | запас захода сверху, м |
-| `n_seeds` | 12 | число стартов IK (измеренная поза + альтернативные плечевые/локтевые конфигурации) |
-| `delta_reference` | measured | опора delta-целей (§5.2) |
-| `delta_accumulate` | true | последовательные delta-команды накапливаются от последней цели |
-| `delta_max_lin/rot` | 0.35/1.2 | предохранители одной delta-команды, м/рад; увеличены для более широкого ручного диапазона |
-| `tcp_offset` | "" | переопределить "x,y,z" кончика поверх arms.json |
-| `model_path` | "" | arms.json (пусто — из share/config) |
-
-## 9. Постоянный режим работы
-
-`arm_ik_node` — **постоянная нода-сервер**: запускается один раз и крутится
-бесконечно (`rclpy.spin`, цикл 50 Гц), ожидая цели на топиках; она не завершается
-после достижения цели и принимает новые цели в любой момент. Останавливается
-только вручную (Ctrl+C) или при падении `/joint_states`.
+## 7. Встроенное демо
 
 ```bash
-# терминал 1 — симулятор/реальный робот по cheatsheet команды...
-
-# терминал 2 — IK-сервер:
-source install/setup.bash
-ros2 launch arm_ik arm_ik.launch.py
-#   или напрямую:
-ros2 run arm_ik arm_ik --ros-args -p use_sim_time:=true -p h_table:=0.9
-#   (в фоне: ... > /tmp/arm_ik.log 2>&1 &)
-
-# теперь цели можно слать когда угодно, сервер их подхватывает:
-ros2 topic pub -1 /arm_ik/goal_right geometry_msgs/msg/PoseStamped \
-  "{header:{frame_id:pelvis}, pose:{position:{x:0.45,y:-0.2,z:1.0}, orientation:{w:1}}}"
-ros2 topic pub -1 /arm_ik/delta_right geometry_msgs/msg/TwistStamped \
-  "{header:{frame_id:pelvis}, twist:{linear:{x:0.05}}}"
-
-# вариант А — абсолютные демо-цели одним запуском:
-ros2 launch arm_ik arm_ik.launch.py demo:=true h_table:=0.9 goal_x:=0.45 goal_z:=1.0
-# вариант Б — delta-«шагоход» (+5 см вперёд каждые 6 с, правая рука):
-ros2 launch arm_ik arm_ik.launch.py demo_delta:=true delta_side:=right delta_x:=0.05
-# мониторинг:
-ros2 topic echo /arm_ik/right/status
-ros2 topic echo /arm_ik/wrist_right_pose
+ros2 launch arm_ik arm_ik.launch.py demo:=true
 ```
 
-## 10. Тесты
+Демо публикует абсолютные цели. Для дельт:
 
 ```bash
-cd arm_ik && python3 -m pytest test -q     # 11 тестов, ROS не нужен
+ros2 launch arm_ik arm_ik.launch.py demo_delta:=true delta_side:=right delta_x:=0.03
 ```
 
-(`pytest.ini` отключает конфликтующий плагин libtmux; если ваш pytest всё же
-падает с «Marks cannot be applied to fixtures» — добавьте `-p no:libtmux`.)
+Не запускайте demo на подключённых приводах без предварительной проверки
+рабочей зоны и отключения силового питания.
 
-Покрывают: детерминированность FK и пределы из docs; совпадение аналитического
-Якобиана с конечно-разностным; round-trip IK(FK(q)); скорость профиля ≤ 0.8;
-клампинг/детекцию стола; чтение arms.json; арифметику delta-целей и достижимость
-delta-цели через IK.
+## 8. Тесты
 
-## 11. Известные ограничения
+Офлайн-тесты математического ядра (ROS-нода и реальные моторы не требуются):
 
-* Модель — 7-звенная цепочка без коллизионной геометрии корпуса/второй руки: стол
-  аналитический (плоскость), тело не проверяется (при заходе сверху и малых
-  дельтах не требуется; для сложных сцен — MoveIt-вариант).
-* DLS — численный метод: экстремальные цели вне workspace дадут `failed`
-  (это корректное поведение, не падение).
-* Перед использованием обязательна перегенерация `arms.json` из фактического
-  URDF и замер `h_table`.
+```bash
+cd <workspace>/src/arm_ik
+python3 -m pytest test -q
+ARM_IK_FORCE_PURE=1 python3 -m pytest test -q
+```
+
+Проверки на ROS 2 Humble и на реальном роботе должны выполняться отдельно:
+сборка пакета, наличие URDF и всех 14 суставов в `/joint_states`, корректность
+TF, соответствие motor ID, dry-run, затем стендовая проверка с ограниченной
+скоростью и аварийной остановкой.
+
+## 9. Структура
+
+- `arm_ik/kinematics.py` — FK, геометрический Якобиан, DLS IK и delta-позы.
+- `arm_ik/urdf_model.py` — извлечение цепей, осей и limits из URDF.
+- `arm_ik/collision.py` — упрощённая геометрическая проверка стола.
+- `arm_ik/trajectory.py` — синхронизированный суставной профиль.
+- `arm_ik/_math_compat.py`, `arm_ik/_pure_np.py` — адаптер NumPy/SciPy и fallback.
+- `arm_ik/nodes/arm_ik_node.py` — ROS 2 узел.
+- `launch/arm_ik.launch.py` — запуск узла.
+- `bin/run_arm_ik.py`, `bin/_bootstrap.py` — запуск из исходников и install.
+- `test/` — офлайн-тесты.

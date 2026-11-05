@@ -33,7 +33,7 @@ class TableGuard:
     def penetration(self, p):
         """Глубина проникновения точки под стол (0 если всё ок)."""
         if self.inside_xy(p):
-            d = (self.h - self.margin) - p[2]
+            d = (self.h + self.margin) - p[2]
             return max(0.0, d)
         return 0.0
 

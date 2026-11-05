@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Запуск ЕДИНСТВЕННОЙ IK-ноды обеих рук (+ опциональные встроенные демо-цели).
 
-Дерево звеньев нода по умолчанию берёт из топиков симулятора /tf + /tf_static,
-время — из /clock (use_sim_time); файлы конфигов не нужны.
+Кинематическая модель строится из /robot_description или urdf_path;
+TF2 используется только для преобразования целевых поз. Время симуляции
+берётся из /clock при use_sim_time:=true.
 
     ros2 launch arm_ik arm_ik.launch.py
     ros2 launch arm_ik arm_ik.launch.py h_table:=0.95
@@ -13,7 +14,7 @@
 """
 import os
 
-from ament_index_python.packages import get_package_prefix, get_package_share_directory
+from ament_index_python.packages import get_package_prefix
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration

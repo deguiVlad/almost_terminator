@@ -26,10 +26,8 @@ setup(
     name="arm_ik",
     version="0.4.0",
     packages=["arm_ik", "arm_ik.nodes"],
-    # файловых конфигов (config/*.json) в пакете больше нет: единственное
-    # дерево звеньев для IK строится из топиков симулятора /tf + /tf_static
-    # (arm_ik/tree_from_tf.py), поэтому package_data/data_files для config
-    # не объявляются.
+    # Конфигурация кинематической цепочки строится из URDF в runtime;
+    # внешние JSON-конфиги пакету не требуются.
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/arm_ik"]),
         ("share/arm_ik", ["package.xml", "README.md", "CHANGELOG.md"]),

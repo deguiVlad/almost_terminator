@@ -228,3 +228,56 @@ def test_orientation_only_task_mask_converges(model):
     assert ok
     T_sol, _ = fk(model, q_sol)
     assert np.linalg.norm(pose_error(T_sol, T_goal)[3:]) < 0.01
+
+
+def test_table_guard_detects_segment_crossing_between_safe_endpoints():
+    from arm_ik.kinematics import ArmModel, JointSpec
+    from arm_ik.collision import TableGuard
+
+    joints = [
+        JointSpec("j1", 1, np.array([0.0, 0.0, 1.0]),
+                  np.array([0.0, 0.0, 0.8]), np.zeros(3), -1.0, 1.0),
+        JointSpec("j2", 2, np.array([0.0, 0.0, 1.0]),
+                  np.array([1.5, 0.0, 0.0]), np.zeros(3), -1.0, 1.0),
+    ]
+    model = ArmModel("left", joints, "tip", tcp_offset=np.zeros(3))
+    guard = TableGuard(h_table=0.9, x0=0.35, x1=1.2,
+                       y_half=0.5, margin=0.02)
+    # Все концы сегмента вне прямоугольника стола, но само звено проходит над
+    # прямоугольником ниже безопасной высоты.
+    assert guard.collides_with_table(model, np.zeros(2))
+
+
+def test_trajectory_rejects_invalid_limits():
+    from arm_ik.trajectory import joint_space_profile
+    q = np.zeros(2)
+    with pytest.raises(ValueError):
+        joint_space_profile(q, q, v_max=0.0)
+    with pytest.raises(ValueError):
+        joint_space_profile(q, q, dt=-0.01)
+
+
+def test_pure_python_fallback_trajectory_runs():
+    import subprocess
+    import textwrap
+
+    package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = textwrap.dedent("""
+        import sys
+        sys.path.insert(0, %r)
+        from arm_ik._math_compat import HAVE_REAL, np
+        from arm_ik.trajectory import joint_space_profile
+        assert not HAVE_REAL
+        q0 = np.zeros(3)
+        q1 = np.array([0.5, -0.4, 0.2])
+        trajectory = joint_space_profile(q0, q1, v_max=0.8, a_max=0.4, dt=0.02)
+        assert len(trajectory) > 1
+        assert np.allclose(trajectory[-1], q1, atol=1e-8)
+        max_step = np.abs(np.diff(trajectory, axis=0)).max()
+        assert max_step <= 0.8 * (0.02 + 1e-9)
+    """) % package_root
+    env = dict(os.environ)
+    env["ARM_IK_FORCE_PURE"] = "1"
+    result = subprocess.run([sys.executable, "-c", code], env=env,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -213,7 +213,8 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
         raise ValueError("T_des44 must be a finite 4x4 transform")
     if len(q) != n_joints or not all(math.isfinite(float(v)) for v in q):
         raise ValueError("q_init must contain one finite value per joint")
-    if int(max_iter) < 1:
+    max_iter = int(max_iter)
+    if max_iter < 1:
         raise ValueError("max_iter must be >= 1")
     if not (math.isfinite(float(damping)) and damping > 0.0):
         raise ValueError("damping must be finite and greater than zero")
@@ -231,6 +232,11 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
             raise ValueError("weight must contain one positive finite value per joint")
         W = np.diag(weight_values)
     q = clip_to_limits(q, model)
+    if q_prefer is not None:
+        q_prefer = np.asarray(q_prefer, dtype=float)
+        if len(q_prefer) != n_joints or not all(
+                math.isfinite(float(v)) for v in q_prefer):
+            raise ValueError("q_prefer must contain one finite value per joint")
 
     if task_mask is not None and len(task_mask) != 6:
         raise ValueError("task_mask must contain exactly 6 booleans")
@@ -343,8 +349,12 @@ def ik_multi_seed(model: ArmModel, T_des44, seeds, n_seeds=None, jitter=None, **
             raise ValueError("IK seed length does not match the arm model")
         if not all(math.isfinite(float(v)) for v in seed):
             raise ValueError("IK seed contains non-finite values")
-    if n_seeds is not None and int(n_seeds) < 1:
-        raise ValueError("n_seeds must be >= 1")
+    if n_seeds is not None:
+        n_seeds = int(n_seeds)
+        if n_seeds < 1:
+            raise ValueError("n_seeds must be >= 1")
+    if jitter is not None and (not math.isfinite(float(jitter)) or jitter < 0.0):
+        raise ValueError("jitter must be finite and non-negative")
     if n_seeds and n_seeds > len(seeds):
         base = seeds[0]
         amp = 0.5 if jitter is None else float(jitter)

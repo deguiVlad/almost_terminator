@@ -851,6 +851,7 @@ class ArmIKNode(Node):
                         ex.state = ArmExecutor.FAILED
                         ex.traj = None
                         ex.idx = 0
+                        ex.T_base_model_at_plan = None
                         self.get_logger().error(
                             f"[{side}] trajectory point blocked by table guard; "
                             "holding the last safe command")

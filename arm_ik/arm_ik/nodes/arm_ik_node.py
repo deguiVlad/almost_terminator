@@ -603,7 +603,6 @@ class ArmIKNode(Node):
 
         # Для абсолютных целей разрешаем безопасный fallback: достичь позиции,
         # если ориентация TCP недостижима. Delta-команды явно отключают его.
-        orientation_relaxed = False
         if not ok and allow_position_fallback and not position_only:
             q_sol, ok, epos, erot = ik_multi_seed(
                 model, T_des_model, seeds, max_iter=350,
@@ -611,7 +610,6 @@ class ArmIKNode(Node):
                 barrier=barrier, task_weights=(1.0, self.ik_rotation_weight),
                 task_mask=[True, True, True, False, False, False])
             if ok:
-                orientation_relaxed = True
                 self.get_logger().warn(
                     f"[{side}] requested orientation relaxed; position target reached")
                 # Fine control must converge to the achievable orientation,

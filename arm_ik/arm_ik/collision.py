@@ -85,8 +85,16 @@ class TableGuard:
         return -k * dq
 
     def _cost(self, pts, link_radius):
+        # Тот же sampling, что и в жёсткой проверке траектории, иначе мягкий
+        # барьер не замечает проникновение середины длинного звена.
         c = 0.0
-        for p in pts:
+        samples = []
+        for a, b in zip(pts[:-1], pts[1:]):
+            length = float(np.linalg.norm(b - a))
+            count = max(1, int(math.ceil(length / 0.02)))
+            for k in range(count + 1):
+                samples.append(a + (b - a) * (float(k) / count))
+        for p in samples:
             d = self.penetration(p - np.array([0, 0, link_radius]))
             c += d * d
         return c

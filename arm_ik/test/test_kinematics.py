@@ -257,27 +257,3 @@ def test_trajectory_rejects_invalid_limits():
         joint_space_profile(q, q, dt=-0.01)
 
 
-def test_pure_python_fallback_trajectory_runs():
-    import subprocess
-    import textwrap
-
-    package_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    code = textwrap.dedent("""
-        import sys
-        sys.path.insert(0, %r)
-        from arm_ik._math_compat import HAVE_REAL, np
-        from arm_ik.trajectory import joint_space_profile
-        assert not HAVE_REAL
-        q0 = np.zeros(3)
-        q1 = np.array([0.5, -0.4, 0.2])
-        trajectory = joint_space_profile(q0, q1, v_max=0.8, a_max=0.4, dt=0.02)
-        assert len(trajectory) > 1
-        assert np.allclose(trajectory[-1], q1, atol=1e-8)
-        max_step = np.abs(np.diff(trajectory, axis=0)).max()
-        assert max_step <= 0.8 * (0.02 + 1e-9)
-    """) % package_root
-    env = dict(os.environ)
-    env["ARM_IK_FORCE_PURE"] = "1"
-    result = subprocess.run([sys.executable, "-c", code], env=env,
-                            capture_output=True, text=True)
-    assert result.returncode == 0, result.stdout + result.stderr

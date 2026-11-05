@@ -11,9 +11,9 @@
 для каждого сустава — смещение d вдоль Z_prev, длина a вдоль X_prev,
 смещение d_y вдоль Y_prev и угол скрутки alpha вокруг X_prev.
 
-!!! ВНИМАНИЕ: встроенные числа — только стартовая заглушка. В рантайме точная
-цепочка звеньев строится нодой из топиков симулятора /tf + /tf_static
-(см. arm_ik.tree_from_tf); файлы URDF/JSON для этого не нужны.
+!!! ВНИМАНИЕ: встроенные числа — только стартовая заглушка для офлайн-тестов.
+В рантайме точная цепочка звеньев, оси и limits строятся из URDF модулем
+arm_ik.urdf_model. TF используется только для преобразования рамок целей.
 
 Модуль не зависит от ROS: чистый numpy/scipy, легко тестируется офлайн.
 """
@@ -202,7 +202,25 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
     Неактивные компоненты исключаются из ошибки и Якобиана.
     """
     q = np.asarray(q_init, dtype=float).copy()
-    W = np.eye(len(model.joints)) if weight is None else np.diag(weight)
+    T_des44 = np.asarray(T_des44, dtype=float)
+    n_joints = len(model.joints)
+    if T_des44.shape != (4, 4) or not np.all(np.isfinite(T_des44)):
+        raise ValueError("T_des44 must be a finite 4x4 pose matrix")
+    if q.shape != (n_joints,) or not np.all(np.isfinite(q)):
+        raise ValueError(f"q_init must contain {n_joints} finite joint values")
+    if int(max_iter) <= 0:
+        raise ValueError("max_iter must be positive")
+    if not all(math.isfinite(float(v)) and float(v) > 0.0
+               for v in (tol_pos, tol_rot, damping, step_scale)):
+        raise ValueError("tolerances, damping and step_scale must be finite and positive")
+    if weight is None:
+        W = np.eye(n_joints)
+    else:
+        weight = np.asarray(weight, dtype=float)
+        if weight.shape != (n_joints,) or not np.all(np.isfinite(weight)) or np.any(weight <= 0.0):
+            raise ValueError("weight must contain one finite positive value per joint")
+        W = np.diag(weight)
+    q = clip_to_limits(q, model)
 
     if task_mask is not None and len(task_mask) != 6:
         raise ValueError("task_mask must contain exactly 6 booleans")
@@ -299,7 +317,15 @@ def ik_multi_seed(model: ArmModel, T_des44, seeds, n_seeds=None, jitter=None, **
     Возвращает (q, ok, err_pos, err_rot).
     """
     import random as _rnd
-    seeds = [np.asarray(s, dtype=float) for s in seeds]         if len(np.shape(seeds)) == 2 else [np.asarray(seeds, dtype=float)]
+    seeds = ([np.asarray(s, dtype=float) for s in seeds]
+             if len(np.shape(seeds)) == 2 else [np.asarray(seeds, dtype=float)])
+    if not seeds:
+        raise ValueError("at least one IK seed is required")
+    if any(seed.shape != (len(model.joints),) or not np.all(np.isfinite(seed))
+           for seed in seeds):
+        raise ValueError("each IK seed must contain finite values for every joint")
+    if n_seeds is not None and int(n_seeds) <= 0:
+        raise ValueError("n_seeds must be positive")
     if n_seeds and n_seeds > len(seeds):
         base = seeds[0]
         amp = 0.5 if jitter is None else float(jitter)
@@ -391,8 +417,13 @@ def delta_to_T(T_ref, dpos=None, drot=None, base_ref=True, delta6=None):
       base_ref=False  — «локальная» дельта: смещение в осях текущей ориентации
                       кисти, вращение постумножением R_new = R_ref @ Rot(drot).
     """
+    T_ref = np.asarray(T_ref, dtype=float)
+    if T_ref.shape != (4, 4) or not np.all(np.isfinite(T_ref)):
+        raise ValueError("T_ref must be a finite 4x4 pose matrix")
     if delta6 is not None and dpos is None:
         d6 = np.asarray(delta6, dtype=float)
+        if d6.shape != (6,) or not np.all(np.isfinite(d6)):
+            raise ValueError("delta6 must contain six finite values")
         dpos, drot = d6[:3], d6[3:]
     if dpos is None:
         dpos = np.zeros(3)
@@ -403,10 +434,10 @@ def delta_to_T(T_ref, dpos=None, drot=None, base_ref=True, delta6=None):
     if drot is None:
         drot = np.zeros(3)
     drot = np.asarray(drot, dtype=float)
-    if len(dpos) != 3:
-        raise ValueError("dpos должен быть 3-мерным (или передайте 6-вектор delta одним аргументом)")
-    if len(drot) != 3:
-        raise ValueError("drot должен быть 3-мерным (rotation vector)")
+    if len(dpos) != 3 or len(drot) != 3:
+        raise ValueError("dpos and drot must each contain exactly three values")
+    if not np.all(np.isfinite(dpos)) or not np.all(np.isfinite(drot)):
+        raise ValueError("delta values must be finite")
     T = np.array(T_ref, dtype=float).copy()
     R_delta = Rotation.from_rotvec(drot).as_matrix()
     if base_ref:

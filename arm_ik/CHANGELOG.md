@@ -1,5 +1,26 @@
 # CHANGELOG — arm_ik
 
+## Unreleased — full package audit
+
+* Corrected URDF TCP link names to `left_tcp_link` / `right_tcp_link` used by the
+  TienKung 2.0 Pro description.
+* Removed unsafe TF-only kinematic reconstruction: TF does not contain the
+  original joint axes or hard joint limits. The node now requires an exact URDF
+  from `urdf_path` or transient-local `/robot_description`.
+* Fixed launch/package dependency declarations and removed an ungenerated
+  `SolveIK.srv` definition and the non-functional service hook.
+* Fixed delta rotation frame handling, demo yaw axis, missing-URDF fallback,
+  table waypoint planning, segment-level table sampling and stale joint-state
+  command watchdog.
+* Corrected trajectory sample-time velocity validation and expanded the pure
+  Python NumPy compatibility layer.
+* Added regression tests for URDF parsing, table segment collision, and
+  pure-Python execution; added GitHub Actions test workflow.
+
+## Historical changes
+
+Earlier entries below describe the package's development history and may refer
+to intermediate implementations that are no longer present.
 ## v0.2.2 — bootstrap устойчив к отсутствию numpy/scipy
 
 * `bin/_bootstrap.py` переписан: при нехватке ЛЮБОГО из `rclpy/numpy/scipy` он

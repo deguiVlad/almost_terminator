@@ -202,7 +202,31 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
     Неактивные компоненты исключаются из ошибки и Якобиана.
     """
     q = np.asarray(q_init, dtype=float).copy()
-    W = np.eye(len(model.joints)) if weight is None else np.diag(weight)
+    n_joints = len(model.joints)
+    target = np.asarray(T_des44, dtype=float)
+    if target.shape != (4, 4) or not all(
+            math.isfinite(float(v)) for row in target for v in row):
+        raise ValueError("T_des44 must be a finite 4x4 transform")
+    if len(q) != n_joints or not all(math.isfinite(float(v)) for v in q):
+        raise ValueError("q_init must contain one finite value per joint")
+    if int(max_iter) < 1:
+        raise ValueError("max_iter must be >= 1")
+    if not (math.isfinite(float(damping)) and damping > 0.0):
+        raise ValueError("damping must be finite and greater than zero")
+    if not (math.isfinite(float(step_scale)) and step_scale > 0.0):
+        raise ValueError("step_scale must be finite and greater than zero")
+    if not all(math.isfinite(float(v)) and float(v) >= 0.0
+               for v in (tol_pos, tol_rot, null_gain)):
+        raise ValueError("tolerances and null_gain must be finite and non-negative")
+    if weight is None:
+        W = np.eye(n_joints)
+    else:
+        weight_values = np.asarray(weight, dtype=float)
+        if weight_values.shape != (n_joints,) or not all(
+                math.isfinite(float(v)) and float(v) > 0.0 for v in weight_values):
+            raise ValueError("weight must contain one positive finite value per joint")
+        W = np.diag(weight_values)
+    q = clip_to_limits(q, model)
 
     if task_mask is not None and len(task_mask) != 6:
         raise ValueError("task_mask must contain exactly 6 booleans")

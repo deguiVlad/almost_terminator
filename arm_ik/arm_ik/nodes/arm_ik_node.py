@@ -238,6 +238,7 @@ class ArmIKNode(Node):
         self.joints = {}
         self._last_joint_state_wall = None
         self._last_joint_state_warning = 0.0
+        self._last_urdf_attempt_wall = None
         self._urdf_xml = None
         self._t0 = self.get_clock().now()   # отсчёт для проверки /clock
         self.exec = {s: ArmExecutor(m) for s, m in self.models.items()}
@@ -355,9 +356,9 @@ class ArmIKNode(Node):
         xml = str(msg.data).strip()
         if xml:
             self._urdf_xml = xml
-            self.try_build_urdf_model()
+            self.try_build_urdf_model(force=True)
 
-    def try_build_urdf_model(self):
+    def try_build_urdf_model(self, force=False):
         """Load exact arm chains and joint limits from a file or robot_description.
 
         TF alone is deliberately not accepted as a kinematic source: it cannot
@@ -365,6 +366,11 @@ class ArmIKNode(Node):
         """
         if self._models_ready:
             return True
+        wall_now = time.monotonic()
+        if (not force and self._last_urdf_attempt_wall is not None
+                and wall_now - self._last_urdf_attempt_wall < 1.0):
+            return False
+        self._last_urdf_attempt_wall = wall_now
 
         candidates = []
         if self.urdf_path:

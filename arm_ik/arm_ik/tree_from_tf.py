@@ -3,30 +3,9 @@
 TF transforms are useful for frame conversion and diagnostics, but they do not
 contain the original URDF joint axes. Consequently this module never builds an
 IK model from TF-only data. Runtime arm models are built by arm_ik.urdf_model.
-"""Кинематическое дерево звеньев рук из топиков симулятора /tf и /tf_static.
-
-Вместо файлов (config/arms.json, URDF на диске) структура звеньев берётся из
-живого TF2-дерева:
-
-  * рёбра /tf_static — постоянные смещения звеньев (fixed-соединения URDF);
-  * рёбра /tf        — активные (вращательные) соединения; их child-рамки
-    сопоставляются с именами суставов из /joint_states по суффиксу стороны
-    (_l/_left, _r/_right);
-  * пределы суставов — из топика /robot_description (лимиты, переданные
-    симулятором), затем — встроенные типовые значения (docs/INTERFACES.md),
-    иначе ±pi. Файлы с диска не читаются.
-
-Модуль НЕ импортирует rclpy/tf2_ros на уровне модуля: данные принимаются
-обычными кортежами (см. tf_edges / tf_constants), поэтому тестируется офлайн.
-ROS-нода извлекает кортежи из tf2_ros.Buffer.all_as_listofmessages().
-
-Выход — dict внутренней конфигурации руки, который читает
-arm_ik.kinematics.arm_from_dict (файл-конфиг для этого не нужен).
 """
-from __future__ import annotations
 
-import collections
-import math
+from __future__ import annotations
 
 from arm_ik._math_compat import np
 from arm_ik._math_compat import Rotation

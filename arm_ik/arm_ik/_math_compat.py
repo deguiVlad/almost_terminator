@@ -2,8 +2,9 @@
 """Чистый Python fallback для numpy/scipy (матрицы 4x4, кватернионы, эйлеры).
 
 Предназначен ТОЛЬКО для запуска ROS-нод в окружениях, где pip-установка
-numpy/scipy недоступна (чужие venv/оверлеи). Точность — double, всё линейное
-(7 DOF), поэтому чистый Python здесь полностью эквивалентен numpy по результату.
+numpy/scipy недоступна (чужие venv/оверлеи). Fallback реализует только подмножество NumPy/SciPy, которое используется
+математическим ядром пакета; он предназначен для офлайн-режима и не заменяет
+полную установку NumPy/SciPy для произвольного внешнего кода.
 
 Публичный API имитирует нужное подмножество:
     np.zeros(n) / np.eye(4) / np.dot(A,B) / np.asarray(x).tolist()
@@ -116,8 +117,7 @@ except Exception:  # окружение без numpy/scipy — чистый Pyth
                 [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]]
 
     class _Rotation:
-        """Подмножество scipy Rotation: from_euler('xyz'), from_rotvec,
-        from_matrix, from_quat; as_matrix(), as_rotvec(), as_quat()."""
+        """Подмножество scipy Rotation, используемое arm_ik."""
 
         def __init__(self, mat):
             self._m = [row[:] for row in mat]
@@ -140,7 +140,14 @@ except Exception:  # окружение без numpy/scipy — чистый Pyth
 
         @classmethod
         def from_quat(cls, q):
-            return cls(_quat_xyzw_to_matrix(list(map(float, q))))
+            values = list(map(float, q))
+            if len(values) != 4 or not all(math.isfinite(v) for v in values):
+                raise ValueError("quaternion must contain four finite values")
+            norm = math.sqrt(sum(v * v for v in values))
+            if norm < 1e-12:
+                raise ValueError("quaternion must have non-zero norm")
+            values = [v / norm for v in values]
+            return cls(_quat_xyzw_to_matrix(values))
 
         def as_matrix(self):
             return _pn._Array([_pn._Array(row) for row in self._m])

@@ -7,7 +7,7 @@
 и в сломанных системных окружениях (например, битый pytz/babel из-за
 некорректного /etc/localtime) это роняет даже `setup.py --help-commands`,
 который вызывает colcon на этапе build. Без entry_points разбор всегда лёгкий;
-исполняемые файлы ставятся через data_files в lib/arm_ik (см. bin/), а ROS-ноды
+исполняемый скрипт ставится через setuptools scripts в lib/arm_ik, а ROS-нода
 запускаются так:
 
     ros2 run arm_ik run_arm_ik.py            # или ./bin/run_arm_ik.py напрямую
@@ -18,7 +18,6 @@ numpy/scipy не объявлены как install_requires — пакет ум�
 на машинах без pip-пакетов.
 """
 import glob
-import os
 
 from setuptools import setup
 
@@ -26,10 +25,8 @@ setup(
     name="arm_ik",
     version="0.4.1",
     packages=["arm_ik", "arm_ik.nodes"],
-    # файловых конфигов (config/*.json) в пакете больше нет: единственное
-    # дерево звеньев для IK строится из топиков симулятора /tf + /tf_static
-    # (arm_ik/tree_from_tf.py), поэтому package_data/data_files для config
-    # не объявляются.
+    # Python-модули устанавливаются setuptools; здесь ставятся ROS-ресурсы,
+    # launch-файл и bootstrap рядом с исполняемым скриптом.
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/arm_ik"]),
         ("share/arm_ik", ["package.xml", "README.md", "CHANGELOG.md"]),
@@ -44,6 +41,6 @@ setup(
     zip_safe=True,
     maintainer="hackathon team",
     maintainer_email="dev@example.com",
-    description="IK обеих рук TienKung 2.0 Pro (7 DOF) c limits и защитой стола",
+    description="URDF-driven 7-DOF arm IK for TienKung 2.0 Pro",
     license="Apache-2.0",
 )

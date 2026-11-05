@@ -345,6 +345,24 @@ class _NP:
         return abs(float(x))
 
     @staticmethod
+    def isfinite(x):
+        if isinstance(x, (list, tuple, _Array)):
+            return _Array([math.isfinite(float(v)) for v in x])
+        return math.isfinite(float(x))
+
+    @staticmethod
+    def isnan(x):
+        if isinstance(x, (list, tuple, _Array)):
+            return _Array([math.isnan(float(v)) for v in x])
+        return math.isnan(float(x))
+
+    @staticmethod
+    def isinf(x):
+        if isinstance(x, (list, tuple, _Array)):
+            return _Array([math.isinf(float(v)) for v in x])
+        return math.isinf(float(x))
+
+    @staticmethod
     def ceil(x):
         return math.ceil(float(x))
 

@@ -148,8 +148,7 @@ def geometric_jacobian(model: ArmModel, q, point=None):
     """
     Ts = chain_transforms(model, q)
     if point is None:
-        T_tcp = Ts[-1] @ _tmat(model.tcp_offset, model.tcp_rpy)
-        p = T_tcp[:3, 3]
+        p = (Ts[-1] @ _tmat(model.tcp_offset, model.tcp_rpy))[:3, 3]
     else:
         p = np.asarray(point, dtype=float)
     Fs = joint_frames(model, q)

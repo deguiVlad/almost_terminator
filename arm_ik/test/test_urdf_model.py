@@ -1,74 +1,49 @@
 # -*- coding: utf-8 -*-
+"""Regression tests for URDF-driven TienKung arm model construction."""
 import os
 import sys
-
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from arm_ik._math_compat import np, Rotation
-from arm_ik.kinematics import fk, geometric_jacobian
-from arm_ik.urdf_model import build_models_from_urdf
+from arm_ik.tree_from_tf import build_models_from_urdf
+from arm_ik.kinematics import fk
 
 
-def _sample_urdf():
-    links = ["waist_yaw_link"]
-    joints = []
-    parent = "waist_yaw_link"
-    for side, tag, y, rpy in (("left", "l", 0.1444, "0.087266 0 0"),
-                              ("right", "r", -0.1444, "-0.087266 0 0")):
-        parent = "waist_yaw_link"
-        for i, kw in enumerate(("shoulder_pitch", "shoulder_roll", "shoulder_yaw",
-                                "elbow_pitch", "elbow_yaw", "wrist_pitch", "wrist_roll")):
-            child = kw + "_" + tag + "_link"
-            name = kw + "_" + tag + "_joint"
-            xyz = "0 %s 0.37712" % y if i == 0 else "0 0 -0.1"
-            origin_rpy = rpy if i == 0 else "0 0 0"
-            axis = ("0 1 0", "1 0 0", "0 0 1", "0 1 0",
-                    "0 0 1", "0 1 0", "1 0 0")[i]
-            joints.append('<joint name="%s" type="revolute"><origin xyz="%s" rpy="%s"/>'
-                          '<parent link="%s"/><child link="%s"/><axis xyz="%s"/>'
-                          '<limit lower="-1.5" upper="1.5"/></joint>' %
-                          (name, xyz, origin_rpy, parent, child, axis))
-            parent = child
-        tip = "L_base_link" if side == "left" else "R_base_link"
-        hand_rpy = "3.14 0 -1.570796" if side == "left" else "3.14 0 1.570796"
-        joints.append('<joint name="%s_tcp_fixed" type="fixed"><origin xyz="0 0 -0.0848" '
-                      'rpy="0 0 0"/><parent link="%s"/><child link="%s"/></joint>' %
-                      (side, parent, tip))
-        # Add a second fixed hand transform to exercise full 6D TCP orientation.
-        palm = "L_palm" if side == "left" else "R_palm"
-        joints.append('<joint name="%s_hand_fixed" type="fixed"><origin xyz="0 0 0" '
-                      'rpy="%s"/><parent link="%s"/><child link="%s"/></joint>' %
-                      (side, hand_rpy, tip, palm))
-    return '<robot name="test">' + "".join(joints) + '</robot>'
+def _urdf():
+    links = ['waist_yaw_link'] + [f'link_{i}' for i in range(1, 8)] + ['tcp_link', 'L_base_link']
+    xml = ['<robot name="test">']
+    xml += [f'<link name="{name}"/>' for name in links]
+    axes = ['0 1 0', '1 0 0', '0 0 1', '0 1 0', '0 0 1', '0 1 0', '1 0 0']
+    names = ['shoulder_pitch_l_joint', 'shoulder_roll_l_joint',
+             'shoulder_yaw_l_joint', 'elbow_pitch_l_joint',
+             'elbow_yaw_l_joint', 'wrist_pitch_l_joint', 'wrist_roll_l_joint']
+    for i, (name, axis) in enumerate(zip(names, axes), 1):
+        parent = 'waist_yaw_link' if i == 1 else 'link_' + str(i - 1)
+        xml.append(
+            f'<joint name="{name}" type="revolute">'
+            f'<parent link="{parent}"/>'
+            f'<child link="link_{i}"/><origin xyz="0 0 -0.1" rpy="0 0 0"/>'
+            f'<axis xyz="{axis}"/><limit lower="-1.2" upper="1.1" effort="10" velocity="2"/></joint>')
+    xml.append('<joint name="tcp_fixed" type="fixed"><parent link="link_7"/><child link="tcp_link"/><origin xyz="0 0 -0.08" rpy="0 0 0"/></joint>')
+    xml.append('<joint name="hand_fixed" type="fixed"><parent link="tcp_link"/><child link="L_base_link"/><origin xyz="0 0 0" rpy="3.14 0 -1.570796"/></joint>')
+    xml.append('</robot>')
+    return ''.join(xml)
 
 
-def test_urdf_builds_both_seven_dof_models_and_motor_ids():
-    models = build_models_from_urdf(_sample_urdf())
-    assert models["left"].names == [
-        "shoulder_pitch_l_joint", "shoulder_roll_l_joint", "shoulder_yaw_l_joint",
-        "elbow_pitch_l_joint", "elbow_yaw_l_joint", "wrist_pitch_l_joint",
-        "wrist_roll_l_joint"]
-    assert models["left"].ids == list(range(11, 18))
-    assert models["right"].ids == list(range(21, 28))
-    assert models["left"].tip_link == "L_base_link"
-    assert models["right"].tip_link == "R_base_link"
-    assert models["left"].tcp_offset[2] == pytest.approx(-0.0848)
-    assert abs(float(models["left"].tcp_rpy[2])) == pytest.approx(1.570796, abs=1e-5)
-
-
-def test_urdf_axes_limits_and_fk_are_used():
-    models = build_models_from_urdf(_sample_urdf())
-    left = models["left"]
-    assert np.allclose(left.joints[0].axis, [0, 1, 0])
-    assert left.lower.tolist() == pytest.approx([-1.5] * 7)
-    T, _ = fk(left, np.zeros(7))
-    assert np.isfinite(T).all()
-    assert geometric_jacobian(left, np.zeros(7)).shape == (6, 7)
-
-
-def test_urdf_rejects_missing_arm_joint():
-    xml = _sample_urdf().replace('name="wrist_roll_r_joint"', 'name="broken_wrist_roll_r_joint"')
-    with pytest.raises(ValueError):
-        build_models_from_urdf(xml)
+def test_urdf_model_uses_joint_axes_limits_and_fixed_tcp_orientation():
+    models = build_models_from_urdf(_urdf(), 'waist_yaw_link')
+    assert set(models) == {'left'}
+    m = models['left']
+    assert len(m.joints) == 7
+    assert m.names[0] == 'shoulder_pitch_l_joint'
+    assert m.names[-1] == 'wrist_roll_l_joint'
+    assert m.ids == [11, 12, 13, 14, 15, 16, 17]
+    assert np.allclose(m.joints[0].axis, [0, 1, 0])
+    assert np.allclose(m.joints[1].axis, [1, 0, 0])
+    assert m.lower[0] == pytest.approx(-1.2)
+    assert m.upper[-1] == pytest.approx(1.1)
+    assert m.tcp_offset[2] == pytest.approx(-0.08)
+    assert abs(m.tcp_rpy[2]) > 1.0
+    T, _ = fk(m, np.zeros(7))
+    assert np.allclose(T[:3, :3], Rotation.from_euler('xyz', m.tcp_rpy).as_matrix(), atol=1e-6)

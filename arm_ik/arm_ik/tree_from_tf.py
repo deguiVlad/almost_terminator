@@ -310,6 +310,82 @@ def build_side_config(edges, constants, joint_names, base, side,
             "tcp_offset": tcp, "joints": out_joints}
 
 
+
+def build_side_config_from_urdf(urdf_xml, base_frame, side):
+    """Build exact arm chain (origins, axes, limits and terminal fixed transform) from URDF."""
+    import xml.etree.ElementTree as ET
+    from arm_ik.kinematics import _tmat
+    root = ET.fromstring(urdf_xml)
+    joints = {}
+    children = collections.defaultdict(list)
+    for j in root.findall("joint"):
+        p, c = j.find("parent"), j.find("child")
+        if p is not None and c is not None:
+            joints[j.get("name")] = j
+            children[p.get("link")].append((j.get("name"), c.get("link")))
+    tip = "L_base_link" if side == "left" else "R_base_link"
+    stack, path = [(base_frame, [])], None
+    while stack:
+        link, chain = stack.pop()
+        if link == tip:
+            path = chain
+            break
+        for name, child in children.get(link, []):
+            stack.append((child, chain + [name]))
+    if path is None:
+        return None
+    result, fixed = [], np.eye(4)
+    for name in path:
+        j = joints[name]
+        origin = j.find("origin")
+        xyz = [float(v) for v in (origin.get("xyz", "0 0 0").split() if origin is not None else [0, 0, 0])]
+        rpy = [float(v) for v in (origin.get("rpy", "0 0 0").split() if origin is not None else [0, 0, 0])]
+        T0 = _tmat(xyz, rpy)
+        if j.get("type") == "fixed":
+            fixed = fixed @ T0
+            continue
+        if j.get("type") not in ("revolute", "continuous"):
+            raise ValueError("Unsupported arm joint type: " + name)
+        axis_el, limit = j.find("axis"), j.find("limit")
+        axis = [float(v) for v in (axis_el.get("xyz", "1 0 0").split() if axis_el is not None else [1, 0, 0])]
+        if j.get("type") == "continuous":
+            lo, hi = -math.pi, math.pi
+        elif limit is not None:
+            lo, hi = float(limit.get("lower", -math.pi)), float(limit.get("upper", math.pi))
+        else:
+            raise ValueError("Missing joint limits: " + name)
+        T_joint = fixed @ T0
+        result.append({
+            "name": name, "motor_id": int(motor_id_for(name)), "axis": axis,
+            "origin_xyz": [float(v) for v in T_joint[:3, 3]],
+            "origin_rpy": [float(v) for v in Rotation.from_matrix(T_joint[:3, :3]).as_euler("xyz")],
+            "limits": [lo, hi],
+        })
+        fixed = np.eye(4)
+    if len(result) != 7:
+        raise ValueError(f"{side}: expected 7 revolute arm joints, found {len(result)}")
+    return {
+        "side": side, "tip_link": tip, "joints": result,
+        "tcp_offset": [float(v) for v in fixed[:3, 3]],
+        "tcp_rpy": [float(v) for v in Rotation.from_matrix(fixed[:3, :3]).as_euler("xyz")],
+    }
+
+
+def build_models_from_urdf(urdf_xml, base_frame="waist_yaw_link", logger=None):
+    """Build both arm models from the supplied robot_description URDF."""
+    from arm_ik.kinematics import arm_from_dict
+    if not urdf_xml:
+        return {}
+    models = {}
+    for side in ("left", "right"):
+        cfg = build_side_config_from_urdf(urdf_xml, base_frame, side)
+        if cfg is not None:
+            models[side] = arm_from_dict(cfg)
+            if logger is not None:
+                logger.info(f"[{side}] 7-DOF модель из URDF; TCP={cfg['tip_link']}; base={base_frame}")
+    return models
+
+
 # ---------------------------------------------------------------------------
 # Пределы суставов
 # ---------------------------------------------------------------------------
@@ -395,6 +471,14 @@ def build_models_from_tf(static_msgs, dynamic_msgs, joint_names, base_frame,
         if logger is not None:
             getattr(logger, level)(text)
 
+    if urdf_xml:
+        try:
+            models = build_models_from_urdf(urdf_xml, base_frame, logger)
+            if len(models) == 2:
+                return models
+            log("warn", f"URDF chain unavailable for base={base_frame}; trying TF fallback")
+        except Exception as exc:
+            log("error", f"URDF parsing failed: {exc}")
     edges = tf_edges(list(static_msgs or []) + list(dynamic_msgs or []))
     if not edges:
         log("warn", "TF-дерево пустое (/tf, /tf_static) — модель не собрана")

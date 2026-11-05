@@ -182,60 +182,60 @@ def clip_to_limits(q, model: ArmModel, margin=0.0):
 
 def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
            tol_rot=2e-2, damping=0.05, step_scale=1.0, weight=None,
-           barrier=None, null_gain=0.0, q_prefer=None):
-    """Итеративная IK: Levenberg-Marquardt / Damped Least Squares.
-
-    Учитывает пределы суставов (clip) и приоритетные веса сочленений.
-    Опционально:
-      barrier   — callable(q) -> dq(7,), барьерный градиент (защита от стола);
-      null_gain/q_prefer — подтяжка в нуль-пространстве к предпочтительной
-                  позе (использует 7-ю степень свободы, позу не меняет).
-    Возвращает (q, success, err_norm_history).
-    """
+           barrier=None, null_gain=0.0, q_prefer=None, task_mask=None):
+    """DLS IK with optional active Cartesian task dimensions."""
     q = np.asarray(q_init, dtype=float).copy()
     W = np.eye(len(model.joints)) if weight is None else np.diag(weight)
+    active = list(range(6)) if task_mask is None else [
+        i for i, enabled in enumerate(task_mask) if enabled]
+    if not active:
+        raise ValueError("task_mask must enable at least one Cartesian dimension")
+    pos_active, rot_active = any(i < 3 for i in active), any(i >= 3 for i in active)
     hist = []
 
-    def _step(cur_q, damp_cur):
-        """Один LM-шаг: возвращает (dq, J, A)."""
+    def task_error(T):
+        e = pose_error(T, T_des44)
+        return np.asarray([e[i] for i in active], dtype=float)
+
+    def converged(e):
+        return ((not pos_active or np.linalg.norm(e[:3]) < tol_pos) and
+                (not rot_active or np.linalg.norm(e[3:]) < tol_rot))
+
+    def _step(cur_q, damp_cur, e_task):
         J = geometric_jacobian(model, cur_q)
-        JW = J @ W
-        A = JW @ J.T + (damp_cur ** 2) * np.eye(6)
-        dq = W @ J.T @ np.linalg.solve(A, e_vec)
+        J_task = np.asarray([J[i] for i in active], dtype=float)
+        JW = J_task @ W
+        A = JW @ J_task.T + (damp_cur ** 2) * np.eye(len(active))
+        dq = W @ J_task.T @ np.linalg.solve(A, e_task)
         if barrier is not None:
             dq = dq + barrier(cur_q)
         if null_gain > 0.0 and q_prefer is not None:
-            # нуль-пространственная проекция: не влияет на позу TCP
-            Jp_inv = W @ J.T @ np.linalg.inv(A)
-            N = np.eye(len(model.joints)) - Jp_inv @ J
+            Jp_inv = W @ J_task.T @ np.linalg.inv(A)
+            N = np.eye(len(model.joints)) - Jp_inv @ J_task
             dq = dq + null_gain * (N @ (np.asarray(q_prefer) - cur_q))
-        return dq, J, A
+        return dq
 
     damp = float(damping)
     for _ in range(max_iter):
         T, _ = fk(model, q)
-        e_vec = pose_error(T, T_des44)
-        nrm = np.linalg.norm(e_vec)
+        e_full = pose_error(T, T_des44)
+        e_task = np.asarray([e_full[i] for i in active], dtype=float)
+        nrm = np.linalg.norm(e_task)
         hist.append(nrm)
-        if nrm < 1e-6 or (np.linalg.norm(e_vec[:3]) < tol_pos and np.linalg.norm(e_vec[3:]) < tol_rot):
+        if converged(e_full):
             return clip_to_limits(q, model), True, hist
-        # Levenberg–Marquardt с backtracking: уменьшаем шаг (damping растёт),
-        # пока норма ошибки не начнёт убывать. Фиксированный damping из DLS
-        # застревал в ~2 мм от цели при жёстком допуске tol_pos=1e-3.
-        accepted = False
-        d_try = damp
+        accepted, d_try = False, damp
         for _bt in range(8):
-            dq, _J, _A = _step(q, d_try)
+            dq = _step(q, d_try, e_task)
             alpha = step_scale
             for _ls in range(5):
                 q_new = clip_to_limits(q + alpha * dq, model, margin=1e-4)
                 if np.allclose(q_new, q, atol=1e-12):
                     break
                 Tn, _ = fk(model, q_new)
-                nn = np.linalg.norm(pose_error(Tn, T_des44))
-                if nn < nrm:
+                if np.linalg.norm(task_error(Tn)) < nrm:
                     q = q_new
-                    damp = max(float(damping) * 0.5, d_try * 0.7)  # успех — ослабляем демпфер
+                    damp = max(float(damping) * 0.5, d_try * 0.7)
                     accepted = True
                     break
                 alpha *= 0.5
@@ -243,11 +243,9 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
                 break
             d_try = min(d_try * 2.0, 0.9)
         if not accepted:
-            return q, False, hist                     # застряли в локальном минимуме
+            return q, False, hist
     T, _ = fk(model, q)
-    e = pose_error(T, T_des44)
-    ok = np.linalg.norm(e[:3]) < tol_pos and np.linalg.norm(e[3:]) < tol_rot
-    return q, ok, hist
+    return q, converged(pose_error(T, T_des44)), hist
 
 
 def ik_multi_seed(model: ArmModel, T_des44, seeds, n_seeds=None, jitter=None, **kw):

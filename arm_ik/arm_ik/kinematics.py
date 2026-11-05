@@ -84,7 +84,10 @@ def _rot_axis(axis, q):
 def chain_transforms(model: ArmModel, q):
     """Возвращает список 4x4 матриц T_i = T(pelvis <- joint_i_frame) после i-го сустава."""
     q = np.asarray(q, dtype=float)
-    assert len(q) == len(model.joints), f"нужно {len(model.joints)} значений, получено {len(q)}"
+    if q.ndim != 1 or len(q) != len(model.joints):
+        raise ValueError(f"expected {len(model.joints)} joint values, got shape {q.shape}")
+    if not np.all(np.isfinite(q)):
+        raise ValueError("joint positions must be finite")
     T = np.eye(4)
     out = []
     for js, qi in zip(model.joints, q):
@@ -177,7 +180,16 @@ def pose_error(T_cur44, T_des44):
 
 
 def clip_to_limits(q, model: ArmModel, margin=0.0):
-    return np.clip(q, model.lower + margin, model.upper - margin)
+    q = np.asarray(q, dtype=float)
+    margin = float(margin)
+    if not math.isfinite(margin) or margin < 0.0:
+        raise ValueError("joint limit margin must be finite and non-negative")
+    lower, upper = model.lower, model.upper
+    if np.any(lower + margin > upper - margin):
+        raise ValueError("joint limit margin leaves an empty interval")
+    if q.shape != lower.shape or not np.all(np.isfinite(q)):
+        raise ValueError("joint vector has invalid shape or non-finite values")
+    return np.clip(q, lower + margin, upper - margin)
 
 
 def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
@@ -419,9 +431,7 @@ _ARM_LIMITS = {
 def arm_from_dict(d):
     """Собирает ArmModel из словаря конфигурации цепочки.
 
-    Единственный поставщик этого dict в рантайме — arm_ik.tree_from_tf
-    (кинематическое дерево из топиков симулятора /tf + /tf_static);
-    файловые конфиги (URDF/JSON) пакет больше не читает.
+    Словарь строится парсером arm_ik.urdf_model из точных origin/axis/limits URDF.
     """
     joints = []
     for jd in d["joints"]:

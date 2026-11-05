@@ -23,10 +23,10 @@ _TIP_LINKS = {"left": "left_tcp_link", "right": "right_tcp_link"}
 def _vec(text, default):
     if not text:
         return np.asarray(default, dtype=float)
-    values = [float(v) for v in text.split()]
-    if len(values) != 3:
-        raise ValueError("URDF vector must contain exactly 3 numbers")
-    return np.asarray(values, dtype=float)
+    values = np.asarray([float(v) for v in text.split()], dtype=float)
+    if values.shape != (3,) or not np.all(np.isfinite(values)):
+        raise ValueError("URDF vector must contain exactly 3 finite numbers")
+    return values
 
 
 def _origin(joint):
@@ -50,8 +50,11 @@ def _path_to_tip(joint_by_child, base_link, tip_link):
             raise ValueError(
                 "URDF has no path from %s to %s (stopped at %s)" %
                 (base_link, tip_link, link))
+        parent = joint.find("parent")
+        if parent is None or not parent.get("link"):
+            raise ValueError("joint has no valid parent link: " + str(joint.get("name")))
         path.append(joint)
-        link = joint.find("parent").get("link")
+        link = parent.get("link")
     return list(reversed(path))
 
 

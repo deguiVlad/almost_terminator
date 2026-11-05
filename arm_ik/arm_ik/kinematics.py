@@ -84,7 +84,11 @@ def _rot_axis(axis, q):
 def chain_transforms(model: ArmModel, q):
     """Возвращает список 4x4 матриц T_i = T(pelvis <- joint_i_frame) после i-го сустава."""
     q = np.asarray(q, dtype=float)
-    assert len(q) == len(model.joints), f"нужно {len(model.joints)} значений, получено {len(q)}"
+    if len(q) != len(model.joints):
+        raise ValueError("expected %d joint values, received %d"
+                         % (len(model.joints), len(q)))
+    if not all(math.isfinite(float(v)) for v in q):
+        raise ValueError("joint positions must be finite")
     T = np.eye(4)
     out = []
     for js, qi in zip(model.joints, q):
@@ -177,7 +181,19 @@ def pose_error(T_cur44, T_des44):
 
 
 def clip_to_limits(q, model: ArmModel, margin=0.0):
-    return np.clip(q, model.lower + margin, model.upper - margin)
+    """Clamp a joint vector to URDF limits, keeping an optional safety margin."""
+    if not math.isfinite(float(margin)) or margin < 0.0:
+        raise ValueError("margin must be finite and non-negative")
+    lower, upper = model.lower, model.upper
+    if any(float(upper[i] - lower[i]) <= 2.0 * margin
+           for i in range(len(model.joints))):
+        raise ValueError("margin leaves no valid interval for at least one joint")
+    values = np.asarray(q, dtype=float)
+    if len(values) != len(model.joints):
+        raise ValueError("joint vector length does not match the arm model")
+    if not all(math.isfinite(float(v)) for v in values):
+        raise ValueError("joint vector contains non-finite values")
+    return np.clip(values, lower + margin, upper - margin)
 
 
 def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
@@ -190,7 +206,37 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
     Неактивные компоненты исключаются из ошибки и Якобиана.
     """
     q = np.asarray(q_init, dtype=float).copy()
-    W = np.eye(len(model.joints)) if weight is None else np.diag(weight)
+    n_joints = len(model.joints)
+    target = np.asarray(T_des44, dtype=float)
+    if target.shape != (4, 4) or not all(
+            math.isfinite(float(v)) for row in target for v in row):
+        raise ValueError("T_des44 must be a finite 4x4 transform")
+    if len(q) != n_joints or not all(math.isfinite(float(v)) for v in q):
+        raise ValueError("q_init must contain one finite value per joint")
+    max_iter = int(max_iter)
+    if max_iter < 1:
+        raise ValueError("max_iter must be >= 1")
+    if not (math.isfinite(float(damping)) and damping > 0.0):
+        raise ValueError("damping must be finite and greater than zero")
+    if not (math.isfinite(float(step_scale)) and step_scale > 0.0):
+        raise ValueError("step_scale must be finite and greater than zero")
+    if not all(math.isfinite(float(v)) and float(v) >= 0.0
+               for v in (tol_pos, tol_rot, null_gain)):
+        raise ValueError("tolerances and null_gain must be finite and non-negative")
+    if weight is None:
+        W = np.eye(n_joints)
+    else:
+        weight_values = np.asarray(weight, dtype=float)
+        if weight_values.shape != (n_joints,) or not all(
+                math.isfinite(float(v)) and float(v) > 0.0 for v in weight_values):
+            raise ValueError("weight must contain one positive finite value per joint")
+        W = np.diag(weight_values)
+    q = clip_to_limits(q, model)
+    if q_prefer is not None:
+        q_prefer = np.asarray(q_prefer, dtype=float)
+        if len(q_prefer) != n_joints or not all(
+                math.isfinite(float(v)) for v in q_prefer):
+            raise ValueError("q_prefer must contain one finite value per joint")
 
     if task_mask is not None and len(task_mask) != 6:
         raise ValueError("task_mask must contain exactly 6 booleans")
@@ -202,8 +248,9 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
     pos_rows = [i for i in active if i < 3]
     rot_rows = [i for i in active if i >= 3]
     task_weights = np.asarray(task_weights, dtype=float)
-    if (task_weights.shape != (2,) or np.any(~np.isfinite(task_weights))
-            or np.any(task_weights <= 0.0)):
+    if (task_weights.shape != (2,) or
+            not all(math.isfinite(float(v)) and float(v) > 0.0
+                    for v in task_weights)):
         raise ValueError("task_weights must be two positive values: (position, rotation)")
     full_scale = [float(task_weights[0])] * 3 + [float(task_weights[1])] * 3
     active_scale = [full_scale[i] for i in active]
@@ -287,7 +334,29 @@ def ik_multi_seed(model: ArmModel, T_des44, seeds, n_seeds=None, jitter=None, **
     Возвращает (q, ok, err_pos, err_rot).
     """
     import random as _rnd
-    seeds = [np.asarray(s, dtype=float) for s in seeds]         if len(np.shape(seeds)) == 2 else [np.asarray(seeds, dtype=float)]
+    if seeds is None:
+        raise ValueError("at least one IK seed is required")
+    raw_seeds = list(seeds)
+    if not raw_seeds:
+        raise ValueError("at least one IK seed is required")
+    first = raw_seeds[0]
+    if isinstance(first, (list, tuple)) or (hasattr(first, "shape") and len(first.shape) > 0):
+        seeds = [np.asarray(seed, dtype=float) for seed in raw_seeds]
+    else:
+        seeds = [np.asarray(raw_seeds, dtype=float)]
+    for seed in seeds:
+        if len(seed) != len(model.joints):
+            raise ValueError("IK seed length does not match the arm model")
+        if not all(math.isfinite(float(v)) for v in seed):
+            raise ValueError("IK seed contains non-finite values")
+    if n_seeds is not None:
+        n_seeds = int(n_seeds)
+        if n_seeds < 1:
+            raise ValueError("n_seeds must be >= 1")
+    if jitter is not None:
+        jitter = float(jitter)
+        if not math.isfinite(jitter) or jitter < 0.0:
+            raise ValueError("jitter must be finite and non-negative")
     if n_seeds and n_seeds > len(seeds):
         base = seeds[0]
         amp = 0.5 if jitter is None else float(jitter)
@@ -354,6 +423,10 @@ def pose_to_T(pos, quat_wxyz):
     """4x4 матрица позы из (позиция 3, кватернион wxyz 4)."""
     pos = np.asarray(pos, dtype=float)
     q = np.asarray(quat_wxyz, dtype=float)
+    if len(pos) != 3 or not all(math.isfinite(float(v)) for v in pos):
+        raise ValueError("position must contain three finite values")
+    if len(q) != 4 or not all(math.isfinite(float(v)) for v in q):
+        raise ValueError("quaternion must contain four finite values")
     T = np.eye(4)
     T[:3, :3] = Rotation.from_quat([q[1], q[2], q[3], q[0]]).as_matrix()
     T[:3, 3] = pos
@@ -387,7 +460,12 @@ def delta_to_T(T_ref, dpos=None, drot=None, base_ref=True, delta6=None):
         raise ValueError("dpos должен быть 3-мерным (или передайте 6-вектор delta одним аргументом)")
     if len(drot) != 3:
         raise ValueError("drot должен быть 3-мерным (rotation vector)")
+    if not all(math.isfinite(float(v)) for v in list(dpos) + list(drot)):
+        raise ValueError("delta values must be finite")
     T = np.array(T_ref, dtype=float).copy()
+    if T.shape != (4, 4) or not all(
+            math.isfinite(float(v)) for row in T for v in row):
+        raise ValueError("T_ref must be a finite 4x4 transform")
     R_delta = Rotation.from_rotvec(drot).as_matrix()
     if base_ref:
         T[:3, :3] = R_delta @ T_ref[:3, :3]
@@ -417,35 +495,56 @@ _ARM_LIMITS = {
 
 
 def arm_from_dict(d):
-    """Собирает ArmModel из словаря конфигурации цепочки.
+    """Build and validate an ArmModel from a URDF-derived dictionary."""
+    side = d.get("side")
+    if side not in ("left", "right"):
+        raise ValueError("arm side must be 'left' or 'right'")
+    joint_data = d.get("joints", [])
+    if len(joint_data) != 7:
+        raise ValueError("each arm model must contain exactly 7 joints")
 
-    Единственный поставщик этого dict в рантайме — arm_ik.tree_from_tf
-    (кинематическое дерево из топиков симулятора /tf + /tf_static);
-    файловые конфиги (URDF/JSON) пакет больше не читает.
-    """
     joints = []
-    for jd in d["joints"]:
-        lo, up = jd["limits"]
+    for jd in joint_data:
+        lo, up = [float(v) for v in jd["limits"]]
+        axis = np.asarray(jd["axis"], dtype=float)
+        origin_xyz = np.asarray(jd["origin_xyz"], dtype=float)
+        origin_rpy = np.asarray(jd["origin_rpy"], dtype=float)
+        if len(axis) != 3 or len(origin_xyz) != 3 or len(origin_rpy) != 3:
+            raise ValueError("joint axis and origin vectors must be 3D")
+        if not all(math.isfinite(float(v)) for v in
+                   list(axis) + list(origin_xyz) + list(origin_rpy) + [lo, up]):
+            raise ValueError("joint geometry and limits must be finite")
+        axis_norm = float(np.linalg.norm(axis))
+        if axis_norm < 1e-12 or lo >= up:
+            raise ValueError("joint axis or limits are invalid")
+        motor_id = int(jd["motor_id"])
+        if motor_id <= 0:
+            raise ValueError("motor IDs must be positive")
         joints.append(JointSpec(
-            name=jd["name"], motor_id=int(jd["motor_id"]),
-            axis=np.array(jd["axis"], dtype=float),
-            origin_xyz=np.array(jd["origin_xyz"], dtype=float),
-            origin_rpy=np.array(jd["origin_rpy"], dtype=float),
-            lower=float(lo), upper=float(up)))
+            name=str(jd["name"]), motor_id=motor_id, axis=axis / axis_norm,
+            origin_xyz=origin_xyz, origin_rpy=origin_rpy,
+            lower=lo, upper=up))
+
+    tcp_offset = np.asarray(d.get("tcp_offset", [0.0, 0.0, 0.0]), dtype=float)
+    tcp_rpy = np.asarray(d.get("tcp_rpy", [0.0, 0.0, 0.0]), dtype=float)
+    if len(tcp_offset) != 3 or len(tcp_rpy) != 3 or not all(
+            math.isfinite(float(v)) for v in list(tcp_offset) + list(tcp_rpy)):
+        raise ValueError("TCP transform must contain finite 3D vectors")
     return ArmModel(
-        side=d["side"], joints=joints, tip_link=d["tip_link"],
-        base_frame=d.get("base_frame", "pelvis"),
-        tcp_offset=np.array(d.get("tcp_offset", [0.0, 0.0, 0.0]), dtype=float),
-        tcp_rpy=np.array(d.get("tcp_rpy", [0.0, 0.0, 0.0]), dtype=float))
+        side=side, joints=joints, tip_link=str(d["tip_link"]),
+        base_frame=d.get("base_frame", "waist_yaw_link"),
+        tcp_offset=tcp_offset, tcp_rpy=tcp_rpy)
 
 
 def make_default_arm(side: str) -> ArmModel:
-    """Стартовая (шаблонная) модель руки: кронштейн->плечо->локоть->запястье.
+    """Неактивная тестовая модель руки: кронштейн->плечо->локоть->запястье.
 
     При q=0 кисть смотрит вперёд (+X базы), звенья идут вдоль +Z предыдущей рамки.
-    Используется как заглушка до получения дерева из /tf + /tf_static и в
-    офлайн-тестах; в рантайме нода заменяет её точной цепочкой из TF.
+    Используется только в офлайн-тестах и до загрузки URDF как неактивная
+    заглушка. Runtime-команды заблокированы, пока не построена точная URDF-модель.
     """
+    if side not in ("left", "right"):
+        raise ValueError("side must be 'left' or 'right'")
     s = 1.0 if side == "left" else -1.0
     tag = "l" if side == "left" else "r"
     y_sh = 0.20 * s       # боковое смещение плеча от средней линии (м)

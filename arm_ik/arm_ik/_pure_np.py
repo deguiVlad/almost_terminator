@@ -265,10 +265,19 @@ class _NP:
 
     @staticmethod
     def allclose(a, b, atol=1e-8, rtol=1e-5):
-        for x, y in zip(a, b):
-            if abs(float(x) - float(y)) > atol + rtol * abs(float(y)):
-                return False
-        return True
+        def flatten(value):
+            out = []
+            for item in value:
+                if isinstance(item, (list, tuple, _Array)):
+                    out.extend(flatten(item))
+                else:
+                    out.append(float(item))
+            return out
+        aa, bb = flatten(a), flatten(b)
+        if len(aa) != len(bb):
+            return False
+        return all(abs(x - y) <= atol + rtol * abs(y)
+                   for x, y in zip(aa, bb))
 
     @staticmethod
     def zeros(n, dtype=None):
@@ -330,7 +339,13 @@ class _NP:
 
     @staticmethod
     def clip(v, lo, hi):
-        return _Array([min(hi, max(lo, float(x))) for x in v])
+        values = list(v)
+        lows = list(lo) if isinstance(lo, (list, tuple, _Array)) else [lo] * len(values)
+        highs = list(hi) if isinstance(hi, (list, tuple, _Array)) else [hi] * len(values)
+        if len(lows) != len(values) or len(highs) != len(values):
+            raise ValueError("clip bounds must be scalar or match the input length")
+        return _Array([min(float(h), max(float(l), float(x)))
+                       for x, l, h in zip(values, lows, highs)])
 
     @staticmethod
     def sign(x):

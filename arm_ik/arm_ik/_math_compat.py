@@ -150,6 +150,23 @@ except Exception:  # окружение без numpy/scipy — чистый Pyth
         def as_matrix(self):
             return _pn._Array([_pn._Array(row) for row in self._m])
 
+        def as_euler(self, seq, degrees=False):
+            if seq != "xyz":
+                raise ValueError("fallback supports only the 'xyz' Euler sequence")
+            m = self._m
+            sy = max(-1.0, min(1.0, -m[2][0]))
+            pitch = math.asin(sy)
+            if abs(math.cos(pitch)) > 1e-9:
+                roll = math.atan2(m[2][1], m[2][2])
+                yaw = math.atan2(m[1][0], m[0][0])
+            else:
+                roll = math.atan2(-m[1][2], m[1][1])
+                yaw = 0.0
+            angles = [roll, pitch, yaw]
+            if degrees:
+                angles = [math.degrees(v) for v in angles]
+            return _pn._Array(angles)
+
         def as_rotvec(self):
             return _pn._Array(_matrix_to_rotvec(self._m))
 

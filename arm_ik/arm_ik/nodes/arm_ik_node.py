@@ -570,6 +570,7 @@ class ArmIKNode(Node):
         if not all(name in self.joints for name in model.names):
             self.get_logger().warn(f"[{side}] IK rejected: /joint_states has not supplied all 7 arm joints")
             return False
+        T_des = np.asarray(T_des, dtype=float).copy()
         if self.guard is not None:
             T_des[:3, 3] = self.guard.clamp_target_above_table(T_des[:3, 3])
         try:
@@ -613,23 +614,31 @@ class ArmIKNode(Node):
 
         # 2) план Б: заход через waypoint строго над столом (две IK-фазы)
         if self.guard is not None:
+            # Реальная промежуточная цель выше конечной; прежний код повторно
+            # решал ту же самую позу и ошибочно называл её waypoint.
             wp = T_des_model.copy()
-            # waypoint поднимаем в системе IK; стол уже проверен в planning frame
-            q_wp, ok1, _, _ = ik_multi_seed(model, wp, seeds, max_iter=250,
-                                            barrier=barrier,
-                                            task_weights=(1.0, self.ik_rotation_weight))
-            q_fin, ok2, _, _ = ik_multi_seed(model, T_des_model, [q_wp] + seeds, max_iter=250,
-                                             barrier=barrier,
-                                             task_weights=(1.0, self.ik_rotation_weight))
-            if ok1 and ok2:
-                t1 = joint_space_profile(q_now, q_wp, self.spd, self.a_max, dt)
-                t2 = joint_space_profile(q_wp, q_fin, self.spd, self.a_max, dt)
-                ex.traj = np.vstack([t1[:-1], t2])
-                ex.idx, ex.state, ex.fine_cycles = 0, ArmExecutor.TRAJ, 0
-                ex.last_T_des = T_des.copy()
-                self.get_logger().info(
-                    f"[{side}] IK через waypoint над столом ({len(ex.traj)} точек)")
-                return True
+            wp[2, 3] += self.lift
+            q_wp, ok1, _, _ = ik_multi_seed(
+                model, wp, seeds, max_iter=300, barrier=barrier,
+                task_weights=(1.0, self.ik_rotation_weight))
+            if ok1:
+                q_fin, ok2, _, _ = ik_multi_seed(
+                    model, T_des_model, [q_wp] + seeds, max_iter=300,
+                    barrier=barrier,
+                    task_weights=(1.0, self.ik_rotation_weight))
+                if ok2:
+                    t1 = joint_space_profile(q_now, q_wp, self.spd, self.a_max, dt)
+                    t2 = joint_space_profile(q_wp, q_fin, self.spd, self.a_max, dt)
+                    candidate = np.vstack([t1[:-1], t2])
+                    path_clear = not any(
+                        self.guard.collides_with_table(model, qq) for qq in candidate)
+                    if path_clear:
+                        ex.traj = candidate
+                        ex.idx, ex.state, ex.fine_cycles = 0, ArmExecutor.TRAJ, 0
+                        ex.last_T_des = T_des.copy()
+                        self.get_logger().info(
+                            f"[{side}] IK через поднятый waypoint ({len(ex.traj)} точек)")
+                        return True
 
         ex.state, ex.traj = ArmExecutor.FAILED, None
         ex.last_err = (epos, erot)
@@ -700,6 +709,14 @@ class ArmIKNode(Node):
             T_ref = ex.last_T_des
         else:
             T_ref = self.tcp_pose_T(side)
+
+        if self.delta_rotation_frame == "tcp":
+            # Для tcp-режима rotation vector задаётся в локальных осях кисти.
+            drot = T_ref[:3, :3] @ drot
+        elif self.delta_rotation_frame != "base":
+            self.get_logger().error(
+                "delta_rotation_frame must be 'base' or 'tcp'; rejecting delta")
+            return
 
         # предохранители: одна дельта не должна быть гигантской
         nl, nr = np.linalg.norm(dpos), np.linalg.norm(drot)

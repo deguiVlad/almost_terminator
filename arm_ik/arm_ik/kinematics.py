@@ -214,7 +214,7 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
         if null_gain > 0.0 and q_prefer is not None:
             # нуль-пространственная проекция: не влияет на позу TCP
             Jp_inv = W @ J.T @ np.linalg.inv(A)
-            N = np.eye(len(model.joints)) - Jp_inv @ J
+            N = np.eye(len(model.joints)) - W @ J_task.T @ np.linalg.solve(A, J_task)
             dq = dq + null_gain * (N @ (np.asarray(q_prefer) - cur_q))
         return dq, J, A
 

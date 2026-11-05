@@ -136,6 +136,7 @@ class ArmIKNode(Node):
         self.declare_parameter("kinematics_base_frame", "waist_yaw_link")
         self.declare_parameter("urdf_path", "")
         self.declare_parameter("rate_hz", 50.0)
+        self.declare_parameter("joint_state_timeout", 0.5)
         self.declare_parameter("spd_limit", 0.8)       # жёсткий лимит документации
         self.declare_parameter("a_max", 0.4)
         self.declare_parameter("tol_pos", 0.01)        # м
@@ -207,6 +208,7 @@ class ArmIKNode(Node):
             if self.get_parameter("enable_table_guard").value else None
 
         self.rate_hz = float(self.get_parameter("rate_hz").value)
+        self.joint_state_timeout = float(self.get_parameter("joint_state_timeout").value)
         self.spd = min(float(self.get_parameter("spd_limit").value), 0.8)  # перестраховка
         self.a_max = float(self.get_parameter("a_max").value)
         self.tol_pos = float(self.get_parameter("tol_pos").value)
@@ -223,7 +225,7 @@ class ArmIKNode(Node):
         self.delta_rotation_frame = str(self.get_parameter("delta_rotation_frame").value).lower()
 
         positive_parameters = {
-            "rate_hz": self.rate_hz, "spd_limit": self.spd,
+            "rate_hz": self.rate_hz, "joint_state_timeout": self.joint_state_timeout, "spd_limit": self.spd,
             "a_max": self.a_max, "tol_pos": self.tol_pos,
             "tol_rot": self.tol_rot, "delta_max_lin": self.delta_max_lin,
             "delta_max_rot": self.delta_max_rot,
@@ -240,6 +242,8 @@ class ArmIKNode(Node):
 
         # ---------------- состояние ----------------
         self.joints = {}
+        self._last_joint_state_time = None
+        self._joint_state_stale_warned = False
         self._urdf_xml = None
         self._t0 = self.get_clock().now()   # отсчёт для проверки /clock
         self.exec = {s: ArmExecutor(m) for s, m in self.models.items()}
@@ -490,7 +494,11 @@ class ArmIKNode(Node):
         values = dict(zip(msg.name, msg.position))
         if not all(np.isfinite(float(v)) for v in values.values()):
             return
-        self.joints.update(values)
+        # Treat each JointState as a complete snapshot; do not silently mix
+        # fresh values with stale joints from earlier partial messages.
+        self.joints = values
+        self._last_joint_state_time = self.get_clock().now()
+        self._joint_state_stale_warned = False
         self._joint_state_received = True
 
     def q_meas(self, model):
@@ -591,6 +599,11 @@ class ArmIKNode(Node):
         model = self.models[side]
         if not all(name in self.joints for name in model.names):
             self.get_logger().warn(f"[{side}] IK rejected: /joint_states has not supplied all 7 arm joints")
+            return False
+        if self._last_joint_state_time is None or (
+                self.get_clock().now() - self._last_joint_state_time).nanoseconds / 1e9 > self.joint_state_timeout:
+            self.get_logger().error(
+                f"[{side}] IK rejected: /joint_states is older than {self.joint_state_timeout:.3f} s")
             return False
         T_des = np.asarray(T_des, dtype=float).copy()
         if self.guard is not None:
@@ -795,6 +808,18 @@ class ArmIKNode(Node):
         if not getattr(self, "_clock_checked", False):
             self._check_sim_clock()
         if not self._tf_models_ready:
+            return
+        joint_age = (float("inf") if self._last_joint_state_time is None else
+                     (self.get_clock().now() - self._last_joint_state_time).nanoseconds / 1e9)
+        if joint_age > self.joint_state_timeout:
+            for ex in self.exec.values():
+                if ex.state in (ArmExecutor.TRAJ, ArmExecutor.FINE):
+                    ex.state = ArmExecutor.FAILED
+                    ex.traj = None
+            if not self._joint_state_stale_warned:
+                self.get_logger().error(
+                    f"/joint_states stale ({joint_age:.3f} s); stopping arm command publication")
+                self._joint_state_stale_warned = True
             return
         for side, model in self.models.items():
             ex = self.exec[side]

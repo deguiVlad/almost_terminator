@@ -10,6 +10,8 @@
     TwistStamped goals, computes bounded joint trajectories and optionally
     publishes motor commands through bodyctrl_msgs.
   </description>
+  <buildtool_depend>ament_python</buildtool_depend>
+
   <maintainer email="dev@example.com">hackathon team</maintainer>
   <license>Apache-2.0</license>
 

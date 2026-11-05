@@ -27,8 +27,8 @@ def _vec(text, default):
     if not text:
         return np.asarray(default, dtype=float)
     values = [float(v) for v in text.split()]
-    if len(values) != 3:
-        raise ValueError("URDF vector must contain exactly 3 numbers")
+    if len(values) != 3 or not all(math.isfinite(v) for v in values):
+        raise ValueError("URDF vector must contain exactly 3 finite numbers")
     return np.asarray(values, dtype=float)
 
 

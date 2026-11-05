@@ -87,8 +87,8 @@ def bootstrap(module_name):
         sys.path.insert(0, pkg_root)
 
     check = ["rclpy"]
-    # bodyctrl_msgs по умолчанию не проверяем: нода умеет работать без него
-    # (печатает предупреждение и использует стандартные JointTrajectory-выходы).
+    # bodyctrl_msgs по умолчанию не проверяем: без него нода работает в dry-run
+    # и не публикует команды моторам.
     if os.environ.get("ARM_IK_REQUIRE_BODYCTRL", "0") == "1":
         check.append("bodyctrl_msgs")
     missing = [m for m in check if _try_import(m) is None]

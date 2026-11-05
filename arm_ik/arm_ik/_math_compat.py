@@ -110,7 +110,12 @@ except Exception:  # окружение без numpy/scipy — чистый Pyth
         return _pn._Array([x / n, y / n, z / n, w / n])
 
     def _quat_xyzw_to_matrix(q):
-        x, y, z, w = q
+        if len(q) != 4 or not all(math.isfinite(float(v)) for v in q):
+            raise ValueError("quaternion must contain four finite values")
+        norm = math.sqrt(sum(float(v) * float(v) for v in q))
+        if norm < 1e-12:
+            raise ValueError("zero-length quaternion is invalid")
+        x, y, z, w = [float(v) / norm for v in q]
         return [[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
                 [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
                 [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]]

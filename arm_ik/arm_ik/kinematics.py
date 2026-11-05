@@ -305,7 +305,7 @@ def ik_multi_seed(model: ArmModel, T_des44, seeds, n_seeds=None, jitter=None, **
     if not raw_seeds:
         raise ValueError("at least one IK seed is required")
     first = raw_seeds[0]
-    if isinstance(first, (list, tuple)) or hasattr(first, "ndim"):
+    if isinstance(first, (list, tuple)) or (hasattr(first, "shape") and len(first.shape) > 0):
         seeds = [np.asarray(seed, dtype=float) for seed in raw_seeds]
     else:
         seeds = [np.asarray(raw_seeds, dtype=float)]

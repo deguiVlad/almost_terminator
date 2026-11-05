@@ -124,8 +124,8 @@ class ArmIKNode(Node):
     def __init__(self):
         super().__init__("arm_ik_node")
         # ---------------- параметры ----------------
-        # TableGuard выключен по умолчанию: URDF-модель работает в waist_yaw_link,
-        # а высота стола должна быть откалибрована именно в этой системе координат.
+        # TableGuard выключен по умолчанию: геометрия стола должна быть откалибрована
+        # именно в base_frame, совпадающем с kinematics_base_frame.
         # use_sim_time объявляется автоматически базовым классом Node (ROS 2 Humble);
         # ручное declare_parameter("use_sim_time", ...) роняло ноду с
         # ParameterAlreadyDeclaredException — не добавлять.
@@ -141,7 +141,7 @@ class ArmIKNode(Node):
         self.declare_parameter("kp", 0.6)              # коррекция недолёта ПД
         self.declare_parameter("ik_rotation_weight", 0.25) # приоритет позиции TCP над ориентацией
         self.declare_parameter("fine_max_cycles", 300) # страховка от бесконечной fine
-        self.declare_parameter("h_table", 0.9)         # высота стола над pelvis, м
+        self.declare_parameter("h_table", 0.9)         # высота стола над base_frame, м
         self.declare_parameter("table_x0", 0.35)
         self.declare_parameter("table_x1", 1.2)
         self.declare_parameter("table_y_half", 1.0)
@@ -318,7 +318,7 @@ class ArmIKNode(Node):
             f"guard={'ON h=%.2f' % self.guard.h if self.guard else 'OFF'} | "
             "custom service=disabled")
 
-    # ------------------------------------------------------------ дерево из TF
+    # ------------------------------------------------------------ URDF и время
     def _check_sim_clock(self):
         """Проверка «время из /clock» при работе с симулятором.
 
@@ -670,7 +670,7 @@ class ArmIKNode(Node):
         self.set_goal(side, T_des)
 
     def tcp_pose_T(self, side):
-        """Измеренная TCP-поза, возвращаемая в planning base_frame (pelvis)."""
+        """Измеренная TCP-поза, возвращаемая в planning base_frame (base_frame)."""
         model = self.models[side]
         T_model_tcp = fk(model, self.q_meas(model))[0]
         T_base_model = self._lookup_T(self.base_frame, self.kinematics_base_frame)

@@ -131,6 +131,12 @@ def test_trajectory_speed_limit():
         for j in range(7):
             vmax = max(vmax, abs(float(prof[k][j]) - float(prof[k - 1][j])) / 0.02)
     assert vmax <= 0.8 + 1e-6, f"скорость {vmax} превысила лимит 0.8 рад/с"
+    velocities = np.diff(prof, axis=0) / 0.02
+    amax = 0.0
+    for k in range(1, len(velocities)):
+        for j in range(7):
+            amax = max(amax, abs(float(velocities[k][j]) - float(velocities[k - 1][j])) / 0.02)
+    assert amax <= 0.4 + 1e-3, f"ускорение {amax} превысило лимит 0.4 рад/с²"
     assert _close(prof[-1], q1, atol=1e-6)
 
 

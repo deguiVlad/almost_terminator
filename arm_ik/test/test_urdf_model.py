@@ -3,6 +3,7 @@
 
 import pytest
 
+from arm_ik._math_compat import np, Rotation
 from arm_ik.urdf_model import build_models_from_urdf
 
 
@@ -66,3 +67,10 @@ def test_rejects_zero_joint_axis():
     xml = _test_urdf().replace('axis xyz="0 1 0"', 'axis xyz="0 0 0"', 1)
     with pytest.raises(ValueError, match="invalid axis"):
         build_models_from_urdf(xml)
+
+
+def test_xyz_euler_round_trip_in_math_compat():
+    expected = np.asarray([0.2, -0.3, 0.4], dtype=float)
+    actual = Rotation.from_matrix(
+        Rotation.from_euler("xyz", expected).as_matrix()).as_euler("xyz")
+    assert np.allclose(actual, expected, atol=1e-8)

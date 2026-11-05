@@ -407,6 +407,10 @@ def pose_to_T(pos, quat_wxyz):
     """4x4 матрица позы из (позиция 3, кватернион wxyz 4)."""
     pos = np.asarray(pos, dtype=float)
     q = np.asarray(quat_wxyz, dtype=float)
+    if len(pos) != 3 or not all(math.isfinite(float(v)) for v in pos):
+        raise ValueError("position must contain three finite values")
+    if len(q) != 4 or not all(math.isfinite(float(v)) for v in q):
+        raise ValueError("quaternion must contain four finite values")
     T = np.eye(4)
     T[:3, :3] = Rotation.from_quat([q[1], q[2], q[3], q[0]]).as_matrix()
     T[:3, 3] = pos
@@ -440,7 +444,12 @@ def delta_to_T(T_ref, dpos=None, drot=None, base_ref=True, delta6=None):
         raise ValueError("dpos должен быть 3-мерным (или передайте 6-вектор delta одним аргументом)")
     if len(drot) != 3:
         raise ValueError("drot должен быть 3-мерным (rotation vector)")
+    if not all(math.isfinite(float(v)) for v in list(dpos) + list(drot)):
+        raise ValueError("delta values must be finite")
     T = np.array(T_ref, dtype=float).copy()
+    if T.shape != (4, 4) or not all(
+            math.isfinite(float(v)) for row in T for v in row):
+        raise ValueError("T_ref must be a finite 4x4 transform")
     R_delta = Rotation.from_rotvec(drot).as_matrix()
     if base_ref:
         T[:3, :3] = R_delta @ T_ref[:3, :3]

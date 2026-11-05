@@ -469,12 +469,13 @@ def delta_to_T(T_ref, dpos=None, drot=None, base_ref=True, delta6=None):
             math.isfinite(float(v)) for row in T for v in row):
         raise ValueError("T_ref must be a finite 4x4 transform")
     R_delta = Rotation.from_rotvec(drot).as_matrix()
+    R_ref = T[:3, :3].copy()
     if base_ref:
-        T[:3, :3] = R_delta @ T[:3, :3]
+        T[:3, :3] = R_delta @ R_ref
         T[:3, 3] = T[:3, 3] + dpos
     else:
-        T[:3, :3] = T[:3, :3] @ R_delta
-        T[:3, 3] = T[:3, 3] + T[:3, :3] @ dpos
+        T[:3, :3] = R_ref @ R_delta
+        T[:3, 3] = T[:3, 3] + R_ref @ dpos
     return T
 
 

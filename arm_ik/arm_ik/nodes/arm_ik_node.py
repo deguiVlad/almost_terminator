@@ -710,7 +710,10 @@ class ArmIKNode(Node):
                 rot = tfm.transform.rotation
                 R_frame_base = Rotation.from_quat([rot.x, rot.y, rot.z, rot.w]).as_matrix()
                 dpos = R_frame_base @ dpos
-                drot = R_frame_base @ drot
+                # Angular delta axes are selected independently by
+                # delta_rotation_frame (base or local TCP), not by header.frame_id.
+                if self.delta_rotation_frame == "base":
+                    drot = R_frame_base @ drot
             except Exception as exc:
                 self.get_logger().warn(
                     f"[{side}] delta rejected: TF {self.base_frame}<-{fid} unavailable: {exc}")

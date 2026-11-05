@@ -125,7 +125,7 @@ class ArmIKNode(Node):
         super().__init__("arm_ik_node")
         # ---------------- параметры ----------------
         # TableGuard выключен по умолчанию: геометрия стола должна быть откалибрована
-        # именно в base_frame, совпадающем с kinematics_base_frame.
+        # именно в base_frame; URDF chain преобразуется в эту рамку через TF2.
         # use_sim_time объявляется автоматически базовым классом Node (ROS 2 Humble);
         # ручное declare_parameter("use_sim_time", ...) роняло ноду с
         # ParameterAlreadyDeclaredException — не добавлять.

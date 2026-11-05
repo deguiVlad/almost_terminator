@@ -85,9 +85,12 @@ except ImportError:
 def pose_to_T(msg_pose):
     p = msg_pose.position
     q = msg_pose.orientation
+    position = [float(p.x), float(p.y), float(p.z)]
+    if not all(math.isfinite(v) for v in position):
+        raise ValueError("pose position must contain finite values")
     T = np.eye(4)
     T[:3, :3] = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
-    T[:3, 3] = [p.x, p.y, p.z]
+    T[:3, 3] = position
     return T
 
 
@@ -705,6 +708,9 @@ class ArmIKNode(Node):
         fid = msg.header.frame_id
         dpos = np.array([msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z])
         drot = np.array([msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z])
+        if not all(math.isfinite(float(v)) for v in list(dpos) + list(drot)):
+            self.get_logger().warn(f"[{side}] delta rejected: non-finite values")
+            return
         if fid not in ("", self.base_frame):
             try:
                 tfm = self.tf_buffer.lookup_transform(

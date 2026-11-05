@@ -182,66 +182,81 @@ def clip_to_limits(q, model: ArmModel, margin=0.0):
 
 def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
            tol_rot=2e-2, damping=0.05, step_scale=1.0, weight=None,
-           barrier=None, null_gain=0.0, q_prefer=None, task_weights=(1.0, 1.0)):
-    """Итеративная IK: Levenberg-Marquardt / Damped Least Squares.
+           barrier=None, null_gain=0.0, q_prefer=None, task_weights=(1.0, 1.0),
+           task_mask=None):
+    """Итеративная DLS IK с необязательной маской Cartesian-задачи.
 
-    Учитывает пределы суставов (clip) и приоритетные веса сочленений.
-    Опционально:
-      barrier   — callable(q) -> dq(7,), барьерный градиент (защита от стола);
-      null_gain/q_prefer — подтяжка в нуль-пространстве к предпочтительной
-                  позе (использует 7-ю степень свободы, позу не меняет).
-    Возвращает (q, success, err_norm_history).
+    task_mask задаёт активные компоненты [x, y, z, rx, ry, rz].
+    Неактивные компоненты исключаются из ошибки и Якобиана.
     """
     q = np.asarray(q_init, dtype=float).copy()
     W = np.eye(len(model.joints)) if weight is None else np.diag(weight)
-    active = list(range(6)) if task_mask is None else [
-        i for i, enabled in enumerate(task_mask) if enabled]
-    if not active:
+
+    if task_mask is None:
+        active = np.arange(6, dtype=int)
+    else:
+        mask = np.asarray(task_mask, dtype=bool)
+        if mask.shape != (6,):
+            raise ValueError("task_mask must contain exactly 6 booleans")
+        active = np.flatnonzero(mask)
+    if active.size == 0:
         raise ValueError("task_mask must enable at least one Cartesian dimension")
-    pos_active, rot_active = any(i < 3 for i in active), any(i >= 3 for i in active)
+
+    pos_active = bool(np.any(active < 3))
+    rot_active = bool(np.any(active >= 3))
+    task_weights = np.asarray(task_weights, dtype=float)
+    if (task_weights.shape != (2,) or np.any(~np.isfinite(task_weights))
+            or np.any(task_weights <= 0.0)):
+        raise ValueError("task_weights must be two positive values: (position, rotation)")
+    full_scale = np.array([task_weights[0]] * 3 + [task_weights[1]] * 3,
+                          dtype=float)
+    active_scale = full_scale[active]
     hist = []
 
-    task_weights = np.asarray(task_weights, dtype=float)
-    if task_weights.shape != (2,) or np.any(~np.isfinite(task_weights)) or np.any(task_weights <= 0.0):
-        raise ValueError("task_weights must be two positive values: (position, rotation)")
-    task_scale = np.array([task_weights[0]] * 3 + [task_weights[1]] * 3, dtype=float)
+    def task_norm(error):
+        return float(np.linalg.norm(active_scale * error[active]))
 
-    def _step(cur_q, damp_cur):
-        """Один взвешенный LM-шаг: приоритетная ошибка TCP."""
-        J = geometric_jacobian(model, cur_q)
-        J_task = task_scale[:, None] * J
-        e_task = task_scale * e_vec
+    def is_converged(error):
+        pos_ok = (not pos_active) or np.linalg.norm(error[:3][active[active < 3]]) <= tol_pos
+        rot_ok = (not rot_active) or np.linalg.norm(error[3:][active[active >= 3] - 3]) <= tol_rot
+        return bool(pos_ok and rot_ok)
+
+    def _step(cur_q, error, damp_cur):
+        J = geometric_jacobian(model, cur_q)[active, :]
+        J_task = active_scale[:, None] * J
+        e_task = active_scale * error[active]
         JW = J_task @ W
-        A = JW @ J_task.T + (damp_cur ** 2) * np.eye(6)
-        dq = W @ J_task.T @ np.linalg.solve(A, e_task)
+        A = JW @ J_task.T + (damp_cur ** 2) * np.eye(active.size)
+        solve_error = np.linalg.solve(A, e_task)
+        dq = W @ J_task.T @ solve_error
         if barrier is not None:
             dq = dq + barrier(cur_q)
         if null_gain > 0.0 and q_prefer is not None:
-            # нуль-пространственная проекция: не влияет на позу TCP
-            Jp_inv = W @ J.T @ np.linalg.inv(A)
-            N = np.eye(len(model.joints)) - W @ J_task.T @ np.linalg.solve(A, J_task)
+            projected = W @ J_task.T @ np.linalg.solve(A, J_task)
+            N = np.eye(len(model.joints)) - projected
             dq = dq + null_gain * (N @ (np.asarray(q_prefer) - cur_q))
         return dq
 
     damp = float(damping)
     for _ in range(max_iter):
         T, _ = fk(model, q)
-        e_vec = pose_error(T, T_des44)
-        nrm = np.linalg.norm(task_scale * e_vec)
+        error = pose_error(T, T_des44)
+        nrm = task_norm(error)
         hist.append(nrm)
-        if converged(e_full):
+        if is_converged(error):
             return clip_to_limits(q, model), True, hist
+
         accepted, d_try = False, damp
         for _bt in range(8):
-            dq = _step(q, d_try, e_task)
+            dq = _step(q, error, d_try)
             alpha = step_scale
             for _ls in range(5):
                 q_new = clip_to_limits(q + alpha * dq, model, margin=1e-4)
                 if np.allclose(q_new, q, atol=1e-12):
                     break
                 Tn, _ = fk(model, q_new)
-                nn = np.linalg.norm(task_scale * pose_error(Tn, T_des44))
-                if nn < nrm:
+                error_new = pose_error(Tn, T_des44)
+                if task_norm(error_new) < nrm:
                     q = q_new
                     damp = max(float(damping) * 0.5, d_try * 0.7)
                     accepted = True
@@ -252,8 +267,9 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
             d_try = min(d_try * 2.0, 0.9)
         if not accepted:
             return q, False, hist
+
     T, _ = fk(model, q)
-    return q, converged(pose_error(T, T_des44)), hist
+    return q, is_converged(pose_error(T, T_des44)), hist
 
 
 def ik_multi_seed(model: ArmModel, T_des44, seeds, n_seeds=None, jitter=None, **kw):

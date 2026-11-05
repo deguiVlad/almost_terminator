@@ -597,6 +597,18 @@ class ArmIKNode(Node):
             tol_rot=self.tol_rot * 0.5, barrier=barrier,
             task_weights=(1.0, self.ik_rotation_weight), task_mask=task_mask)
 
+        # Для абсолютных целей разрешаем безопасный fallback: достичь позиции,
+        # если ориентация TCP недостижима. Delta-команды явно отключают его.
+        if not ok and allow_position_fallback and not position_only:
+            q_sol, ok, epos, erot = ik_multi_seed(
+                model, T_des_model, seeds, max_iter=350,
+                tol_pos=self.tol_pos * 0.5, tol_rot=self.tol_rot * 0.5,
+                barrier=barrier, task_weights=(1.0, self.ik_rotation_weight),
+                task_mask=[True, True, True, False, False, False])
+            if ok:
+                self.get_logger().warn(
+                    f"[{side}] requested orientation relaxed; position target reached")
+
         dt = 1.0 / self.rate_hz
         if ok and self.guard is not None:
             traj = joint_space_profile(q_now, q_sol, self.spd, self.a_max, dt)

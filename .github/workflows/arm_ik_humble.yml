@@ -1,0 +1,36 @@
+name: arm_ik ROS 2 Humble CI
+
+on:
+  push:
+    paths:
+      - "arm_ik/**"
+      - ".github/workflows/arm_ik_humble.yml"
+  pull_request:
+    paths:
+      - "arm_ik/**"
+      - ".github/workflows/arm_ik_humble.yml"
+  workflow_dispatch:
+
+jobs:
+  humble:
+    runs-on: ubuntu-22.04
+    container:
+      image: ros:humble-ros-base
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install package and test tools
+        run: |
+          apt-get update
+          apt-get install -y python3-pytest python3-colcon-common-extensions \
+            ros-humble-tf2-ros ros-humble-launch-ros \
+            ros-humble-geometry-msgs ros-humble-sensor-msgs ros-humble-std-msgs
+      - name: Run offline tests
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          python3 -m pytest arm_ik/test -q
+      - name: Build ROS 2 package
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          colcon build --base-paths arm_ik --packages-select arm_ik --symlink-install

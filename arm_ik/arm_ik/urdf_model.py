@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 
 from arm_ik._math_compat import np, Rotation
 from arm_ik.kinematics import ArmModel, JointSpec, _tmat
-from arm_ik.tree_from_tf import motor_id_for
+from arm_ik.motor_mapping import motor_id_for
 
 _ARM_JOINTS = (
     "shoulder_pitch", "shoulder_roll", "shoulder_yaw",

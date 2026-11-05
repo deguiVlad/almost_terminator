@@ -149,7 +149,7 @@ class ArmIKNode(Node):
         self.declare_parameter("table_margin", 0.02)
         self.declare_parameter("enable_table_guard", False)
         self.declare_parameter("waypoint_lift", 0.25)  # заход сверху, м (FOCUS_TRACKING §Шаг2)
-        self.declare_parameter("n_seeds", 4)           # альтернативных стартов IK
+        self.declare_parameter("n_seeds", 12)          # расширенный набор стартов IK
         self.declare_parameter("tcp_offset", "")         # "x,y,z" поверх TF-цепочки (переопределить кончик)
         # --- источник дерева звеньев для IK ---
         # Единственный источник — топики симулятора /tf и /tf_static
@@ -160,8 +160,8 @@ class ArmIKNode(Node):
         # --- параметры delta-целей (TwistStamped на /arm_ik/delta_{left,right}) ---
         self.declare_parameter("delta_reference", "measured")  # measured | last_goal
         self.declare_parameter("delta_accumulate", False)      # суммировать ли дельты между собой
-        self.declare_parameter("delta_max_lin", 0.15)          # предохранитель, м
-        self.declare_parameter("delta_max_rot", 0.6)           # предохранитель, рад
+        self.declare_parameter("delta_max_lin", 0.35)          # предохранитель на одну команду, м
+        self.declare_parameter("delta_max_rot", 1.2)           # предохранитель на одну команду, рад
         # --- встроенные демо-паблишеры (заменяют отдельные ноды demo_*) ---
         self.declare_parameter("demo_goals", False)   # публиковать PoseStamped-цели
         self.declare_parameter("demo_delta", False)   # публиковать TwistStamped-дельты
@@ -546,19 +546,46 @@ class ArmIKNode(Node):
         return T_bc @ pose_to_T(goal.pose)
 
     def seed_poses(self, model, q_now):
-        """Текущая поза + несколько «типовых» поз — борьба с локальными минимумами DLS."""
-        seeds = [q_now.copy()]
-        home = clip_to_limits(np.zeros(7), model, margin=0.1)
-        seeds.append(home)
+        """Расширенный детерминированный набор IK-стартов в пределах URDF.
+
+        Первый seed — измеренная конфигурация (минимум движения и быстрый путь).
+        Остальные покрывают альтернативные плечевые/локтевые конфигурации, чтобы
+        не считать локальный минимум текущей позы границей рабочего пространства.
+        """
+        q_now = np.asarray(q_now, dtype=float)
+        seeds = [clip_to_limits(q_now, model)]
+        home = clip_to_limits(np.zeros(7), model, margin=0.05)
         reach = np.array([-0.4, 0.3, 0.0, -0.9, 0.0, 0.2, 0.0])
-        if model.side == "left":
-            reach[1] = -reach[1]
-        seeds.append(clip_to_limits(reach, model, margin=0.05))
         bent = np.array([-0.8, 0.5, 0.4, -1.6, 0.3, 0.4, 0.0])
         if model.side == "left":
+            reach[1] = -reach[1]
             bent[1] = -bent[1]
-        seeds.append(clip_to_limits(bent, model, margin=0.05))
-        return seeds[: max(1, self.n_seeds)]
+        seeds.extend((home,
+                      clip_to_limits(reach, model, margin=0.03),
+                      clip_to_limits(bent, model, margin=0.03)))
+
+        # Парные возмущения меняют конфигурацию плеча/локтя, сохраняя все
+        # реальные суставные пределы. Они используются только если measured
+        # seed не сошёлся, поэтому расширение поиска не замедляет обычные цели.
+        patterns = (
+            (0.65, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            (-0.65, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            (0.0, 0.55, 0.0, -0.55, 0.0, 0.0, 0.0),
+            (0.0, -0.55, 0.0, -0.55, 0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.65, -0.45, 0.0, 0.0, 0.0),
+            (0.0, 0.0, -0.65, -0.45, 0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0, 0.65, 0.55, 0.0, 0.0),
+            (0.0, 0.0, 0.0, 0.65, -0.55, 0.0, 0.0),
+        )
+        for offset in patterns:
+            seeds.append(clip_to_limits(q_now + np.asarray(offset), model, margin=0.02))
+
+        # После clipping некоторые стартовые конфигурации могут совпасть.
+        unique = []
+        for q in seeds:
+            if not any(np.linalg.norm(q - prev) < 1e-4 for prev in unique):
+                unique.append(q)
+        return unique[:max(1, self.n_seeds)]
 
     # ------------------------------------------------------------ goals
     def _lookup_T(self, target_frame, source_frame):
@@ -604,7 +631,7 @@ class ArmIKNode(Node):
         # 1) IK: multi-seed DLS с барьером стола
         seeds = self.seed_poses(model, q_now)
         q_sol, ok, epos, erot = ik_multi_seed(
-            model, T_des_model, seeds, max_iter=250, tol_pos=self.tol_pos * 0.5,
+            model, T_des_model, seeds, max_iter=350, tol_pos=self.tol_pos * 0.5,
             tol_rot=self.tol_rot * 0.5, barrier=barrier)
 
         dt = 1.0 / self.rate_hz

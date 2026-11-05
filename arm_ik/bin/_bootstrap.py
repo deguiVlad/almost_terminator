@@ -78,7 +78,7 @@ def _strip_shadowing_paths(here):
 def bootstrap(module_name):
     """Возвращает callable main() пакета arm_ik.nodes.<module_name>.
 
-    module_name: 'arm_ik_node' | 'demo_goal_publisher' | 'demo_delta_publisher'
+    module_name: currently only 'arm_ik_node'
     """
     here = os.path.dirname(os.path.abspath(__file__))
     _strip_shadowing_paths(here)

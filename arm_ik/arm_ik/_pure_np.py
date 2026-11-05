@@ -136,10 +136,19 @@ class _Array(list):
 
     # ---------- арифметика поэлементно ----------
     def _binop(self, other, f):
-        if isinstance(other, (int, float)):
-            return _Array([f(float(x), other) for x in self])
-        oth = [_Array(x) if isinstance(x, list) else x for x in other]
-        return _Array([f(float(a), float(b)) for a, b in zip(self, oth)])
+        def apply(a, b):
+            a_seq = isinstance(a, (list, tuple, _Array))
+            b_seq = isinstance(b, (list, tuple, _Array))
+            if a_seq and b_seq:
+                if len(a) != len(b):
+                    raise ValueError("array operands must have matching shapes")
+                return _Array([apply(x, y) for x, y in zip(a, b)])
+            if a_seq:
+                return _Array([apply(x, b) for x in a])
+            if b_seq:
+                return _Array([apply(a, y) for y in b])
+            return f(float(a), float(b))
+        return apply(self, other)
 
     def __add__(self, o):
         return self._binop(o, lambda a, b: a + b)
@@ -163,16 +172,30 @@ class _Array(list):
         return self._binop(o, lambda a, b: a / b)
 
     def __neg__(self):
-        return _Array([-float(x) for x in self])
+        def apply(x):
+            return _Array([apply(v) for v in x]) if isinstance(x, (list, tuple, _Array)) else -float(x)
+        return apply(self)
 
     def __abs__(self):
-        return _Array([abs(float(x)) for x in self])
+        def apply(x):
+            return _Array([apply(v) for v in x]) if isinstance(x, (list, tuple, _Array)) else abs(float(x))
+        return apply(self)
 
     # сравнения -> списки bool (для where/any/all)
     def _cmp(self, o, f):
-        if isinstance(o, (int, float)):
-            return [f(float(x), o) for x in self]
-        return [f(float(a), float(b)) for a, b in zip(self, o)]
+        def apply(a, b):
+            a_seq = isinstance(a, (list, tuple, _Array))
+            b_seq = isinstance(b, (list, tuple, _Array))
+            if a_seq and b_seq:
+                if len(a) != len(b):
+                    raise ValueError("comparison operands must have matching shapes")
+                return _Array([apply(x, y) for x, y in zip(a, b)])
+            if a_seq:
+                return _Array([apply(x, b) for x in a])
+            if b_seq:
+                return _Array([apply(a, y) for y in b])
+            return f(float(a), float(b))
+        return apply(self, o)
 
     def __le__(self, o):
         return self._cmp(o, lambda a, b: a <= b)

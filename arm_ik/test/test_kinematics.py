@@ -131,6 +131,16 @@ def test_trajectory_speed_limit():
         for j in range(7):
             vmax = max(vmax, abs(float(prof[k][j]) - float(prof[k - 1][j])) / 0.02)
     assert vmax <= 0.8 + 1e-6, f"скорость {vmax} превысила лимит 0.8 рад/с"
+    velocities = [
+        [(float(prof[k + 1][j]) - float(prof[k][j])) / 0.02
+         for j in range(7)]
+        for k in range(len(prof) - 1)
+    ]
+    amax = 0.0
+    for k in range(1, len(velocities)):
+        for j in range(7):
+            amax = max(amax, abs(velocities[k][j] - velocities[k - 1][j]) / 0.02)
+    assert amax <= 2.0 + 1e-3, f"ускорение {amax} превысило лимит 2.0 рад/с²"
     assert _close(prof[-1], q1, atol=1e-6)
 
 
@@ -184,8 +194,7 @@ def test_delta_goal_reachable_by_ik(model):
 
 
 def test_arm_from_dict_roundtrip(model):
-    """arm_from_dict — единственный внутренний способ собрать ArmModel
-    (его использует tree_from_tf); файловых загрузчиков в пакете нет."""
+    """arm_from_dict validates dictionaries used by offline and external tooling."""
     from arm_ik.kinematics import arm_from_dict
     data = {"side": model.side, "tip_link": model.tip_link,
             "base_frame": model.base_frame,
@@ -200,7 +209,7 @@ def test_arm_from_dict_roundtrip(model):
     assert len(m.joints) == 7 and m.side == model.side
     assert m.names == model.names and m.ids == model.ids
 
- 
+
 def test_position_only_ik_reaches_target_position(model):
     from arm_ik.kinematics import fk, ik_dls
     q0 = np.array([0.1, -0.2, 0.3, -0.9, 0.2, 0.4, -0.1])

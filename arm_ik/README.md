@@ -195,6 +195,7 @@ TF, соответствие motor ID, dry-run, затем стендовая п
 
 - `arm_ik/kinematics.py` — FK, геометрический Якобиан, DLS IK и delta-позы.
 - `arm_ik/urdf_model.py` — извлечение цепей, осей и limits из URDF.
+- `arm_ik/motor_mapping.py` — проверяемое сопоставление имён суставов и motor ID.
 - `arm_ik/collision.py` — упрощённая геометрическая проверка стола.
 - `arm_ik/trajectory.py` — синхронизированный суставной профиль.
 - `arm_ik/_math_compat.py`, `arm_ik/_pure_np.py` — адаптер NumPy/SciPy и fallback.

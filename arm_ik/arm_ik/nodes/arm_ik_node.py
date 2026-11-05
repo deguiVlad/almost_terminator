@@ -115,6 +115,10 @@ class ArmExecutor:
         self.last_err = (float("nan"), float("nan"))
         # опорная поза для delta-целей (используется при delta_reference=last_goal):
         self.last_T_des = None
+        # Transform from URDF root into planning frame at goal acceptance.
+        # If the torso yaw changes while a goal is active/reached, the goal
+        # is no longer fixed in the same kinematic frame and execution is stopped.
+        self.T_base_model_at_plan = None
         # Последняя отправленная позиция суставов; повторно публикуется
         # в idle/reached/failed, чтобы контроллер продолжал удерживать позу.
         self.hold_q = None
@@ -782,6 +786,7 @@ class ArmIKNode(Node):
                 ex.traj = None
                 ex.idx = 0
                 ex.hold_q = None
+                ex.T_base_model_at_plan = None
             wall_now = time.monotonic()
             if wall_now - self._last_joint_state_warning > 2.0:
                 self.get_logger().error(

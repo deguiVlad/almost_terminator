@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Запуск ЕДИНСТВЕННОЙ IK-ноды обеих рук (+ опциональные встроенные демо-цели).
 
-Дерево звеньев нода по умолчанию берёт из топиков симулятора /tf + /tf_static,
-время — из /clock (use_sim_time); файлы конфигов не нужны.
+Кинематическая модель строится из /robot_description или urdf_path;
+TF2 используется только для преобразования целевых поз. Время симуляции
+берётся из /clock при use_sim_time:=true.
 
     ros2 launch arm_ik arm_ik.launch.py
     ros2 launch arm_ik arm_ik.launch.py h_table:=0.95
@@ -13,7 +14,7 @@
 """
 import os
 
-from ament_index_python.packages import get_package_prefix, get_package_share_directory
+from ament_index_python.packages import get_package_prefix
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
@@ -50,10 +51,21 @@ def launch_setup(context, *args, **kwargs):
 
     params = {
         "use_sim_time": b("use_sim_time"),
+        "base_frame": LaunchConfiguration("base_frame").perform(context),
         "rate_hz": float(LaunchConfiguration("rate_hz").perform(context)),
+        "joint_state_timeout": float(LaunchConfiguration("joint_state_timeout").perform(context)),
         "spd_limit": float(LaunchConfiguration("spd_limit").perform(context)),
+        "a_max": float(LaunchConfiguration("a_max").perform(context)),
         "h_table": float(LaunchConfiguration("h_table").perform(context)),
+        "table_x0": float(LaunchConfiguration("table_x0").perform(context)),
+        "table_x1": float(LaunchConfiguration("table_x1").perform(context)),
+        "table_y_half": float(LaunchConfiguration("table_y_half").perform(context)),
         "table_margin": float(LaunchConfiguration("table_margin").perform(context)),
+        "waypoint_lift": float(LaunchConfiguration("waypoint_lift").perform(context)),
+        "n_seeds": int(LaunchConfiguration("n_seeds").perform(context)),
+        "ik_rotation_weight": float(LaunchConfiguration("ik_rotation_weight").perform(context)),
+        "delta_max_lin": float(LaunchConfiguration("delta_max_lin").perform(context)),
+        "delta_max_rot": float(LaunchConfiguration("delta_max_rot").perform(context)),
         "tol_pos": float(LaunchConfiguration("tol_pos").perform(context)),
         "tol_rot": float(LaunchConfiguration("tol_rot").perform(context)),
         "kp": float(LaunchConfiguration("kp").perform(context)),
@@ -65,7 +77,7 @@ def launch_setup(context, *args, **kwargs):
         "delta_rotation_frame": LaunchConfiguration("delta_rotation_frame").perform(context),
         "enable_table_guard": b("table_guard"),
         # встроенные демо-паблишеры (внутри той же ноды)
-        "demo_goals": b("demo"),
+        "demo_goals": b("demo_goals"),
         "demo_delta": b("demo_delta"),
         "demo_side": LaunchConfiguration("delta_side").perform(context),
         "demo_x": float(LaunchConfiguration("goal_x").perform(context)),
@@ -86,10 +98,21 @@ def generate_launch_description():
     d = lambda name, val, desc="": DeclareLaunchArgument(name, default_value=val, description=desc)
     return LaunchDescription([
         d("use_sim_time", "true", "время из /clock (симулятор)"),
+        d("base_frame", "waist_yaw_link", "система координат целей и телеметрии"),
         d("rate_hz", "50", "частота контура и генерации траектории"),
+        d("joint_state_timeout", "0.5", "таймаут обратной связи /joint_states, с"),
         d("spd_limit", "0.8", "жёсткий лимит скорости моторов рук, рад/с"),
-        d("h_table", "0.9", "высота поверхности стола над waist_yaw_link, м (после калибровки)"),
+        d("a_max", "0.4", "лимит ускорения траектории, рад/с^2"),
+        d("h_table", "0.9", "высота поверхности стола в guard frame, м"),
+        d("table_x0", "0.35", "минимальный X стола в guard frame, м"),
+        d("table_x1", "1.2", "максимальный X стола в guard frame, м"),
+        d("table_y_half", "1.0", "половина ширины стола по Y, м"),
         d("table_margin", "0.02", "запас от стола, м"),
+        d("waypoint_lift", "0.25", "подъём промежуточной цели, м"),
+        d("n_seeds", "12", "максимум стартовых конфигураций IK"),
+        d("ik_rotation_weight", "0.25", "вес ориентации в задаче IK"),
+        d("delta_max_lin", "0.35", "максимальная линейная delta, м"),
+        d("delta_max_rot", "1.2", "максимальная угловая delta, рад"),
         d("tol_pos", "0.01", "допуск достижения цели по позиции, м"),
         d("tol_rot", "0.05", "допуск по ориентации, рад"),
         d("kp", "0.6", "усиление P-коррекции недолёта ПД-приводов"),
@@ -98,9 +121,9 @@ def generate_launch_description():
         d("urdf_path", "", "путь к tiangong_pro_with_hands.urdf (пусто — /robot_description)"),
         d("kinematics_base_frame", "waist_yaw_link", "база URDF-цепочки обеих рук"),
         d("delta_reference", "measured", "опора delta-целей: measured | last_goal"),
-        d("delta_accumulate", "false", "суммировать серию delta-смещений"),
+        d("delta_accumulate", "true", "суммировать серию delta-смещений"),
         d("delta_rotation_frame", "base", "оси вращения delta: base | tcp"),
-        d("demo", "false", "нода сама публикует абсолютные цели (PoseStamped)"),
+        d("demo_goals", "false", "нода сама публикует абсолютные цели (PoseStamped)"),
         d("goal_x", "0.45", "демо: x цели, м"),
         d("goal_y_left", "0.25", "демо: y левой руки, м"),
         d("goal_y_right", "-0.25", "демо: y правой руки, м"),

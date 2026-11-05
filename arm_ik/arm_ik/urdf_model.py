@@ -17,7 +17,7 @@ _ARM_JOINTS = (
     "shoulder_pitch", "shoulder_roll", "shoulder_yaw",
     "elbow_pitch", "elbow_yaw", "wrist_pitch", "wrist_roll",
 )
-_TIP_LINKS = {"left": "L_base_link", "right": "R_base_link"}
+_TIP_LINKS = {"left": "left_tcp_link", "right": "right_tcp_link"}
 
 
 def _vec(text, default):

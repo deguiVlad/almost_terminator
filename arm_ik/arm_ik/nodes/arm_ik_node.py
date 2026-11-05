@@ -504,7 +504,7 @@ class ArmIKNode(Node):
         now = self.get_clock().now().to_msg()
         if self.demo_goal_pubs:
             yaw = math.radians(g("demo_yaw_deg"))
-            q = Rotation.from_euler("xyz", [yaw, 0.0, 0.0]).as_quat()
+            q = Rotation.from_euler("xyz", [0.0, 0.0, yaw]).as_quat()
             ys = {"left": g("demo_y_l"), "right": g("demo_y_r")}
             for s, pub in self.demo_goal_pubs.items():
                 ps = PoseStamped()

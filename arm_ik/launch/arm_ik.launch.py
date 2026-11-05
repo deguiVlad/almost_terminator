@@ -5,7 +5,7 @@
 transient-local топика /robot_description. TF2 используется для frame transforms.
 
     ros2 launch arm_ik arm_ik.launch.py
-    ros2 launch arm_ik arm_ik.launch.py h_table:=0.95
+    ros2 launch arm_ik arm_ik.launch.py table_guard:=true h_table:=0.95
     ros2 launch arm_ik arm_ik.launch.py demo:=true goal_x:=0.45 goal_z:=1.0
     ros2 launch arm_ik arm_ik.launch.py demo_delta:=true delta_side:=right delta_x:=0.05
 
@@ -118,7 +118,7 @@ def generate_launch_description():
         d("tol_rot", "0.05", "допуск по ориентации, рад"),
         d("kp", "0.6", "усиление P-коррекции недолёта ПД-приводов"),
         d("table_guard", "false", "включить защиту от стола после калибровки"),
-        d("tcp_offset", "", "legacy: переопределение смещения TCP"),
+        d("tcp_offset", "", "переопределение TCP offset из URDF, x,y,z в метрах"),
         d("urdf_path", "", "путь к tiangong_pro_with_hands.urdf (пусто — /robot_description)"),
         d("kinematics_base_frame", "waist_yaw_link", "база URDF-цепочки обеих рук"),
         d("delta_reference", "measured", "опора delta-целей: measured | last_goal"),
@@ -129,7 +129,7 @@ def generate_launch_description():
         d("goal_y_left", "0.25", "демо: y левой руки, м"),
         d("goal_y_right", "-0.25", "демо: y правой руки, м"),
         d("goal_z", "1.0", "демо: z цели, м"),
-        d("goal_yaw_deg", "-90", "демо: кисть смотрит вниз, град"),
+        d("goal_yaw_deg", "-90", "демо: поворот yaw вокруг Z, град"),
         d("demo_delta", "false", "нода сама публикует delta-смещения (TwistStamped)"),
         d("delta_side", "both", "демо delta: left | right | both"),
         d("delta_x", "0.05", "демо delta: смещение вперёд, м"),

@@ -192,7 +192,7 @@ ros2 topic pub -1 /arm_ik/goal_right geometry_msgs/msg/PoseStamped "{
 
 Шестимерное **относительное** смещение текущей позы TCP:
 * `twist.linear.{x,y,z}` — dxyz в метрах в рамке `header.frame_id` (при публикации в иной TF-рамке узел преобразует вектор в `waist_yaw_link`);
-* `twist.angular.{x,y,z}` — rotation vector (ось × угол, радианы) в той же рамке.
+* `twist.angular.{x,y,z}` — rotation vector (ось × угол, радианы); оси вращения выбираются `delta_rotation_frame:=base|tcp`. `base` — оси корпуса, `tcp` — собственные оси кисти.
 
 Цель вычисляется как `T_new = Δ · T_ref`:
 `p_new = p_ref + dpos`, `R_new = Rot(drot) · R_ref`.
@@ -239,6 +239,13 @@ ros2 run arm_ik demo_delta --ros-args -p use_sim_time:=true \
 | `/arm_ik/wrist_{left,right}_pose` | `PoseStamped` (pelvis) | текущая FK-поза TCP по энкодерам — видно в RViz, полезно верхнему уровню |
 | `/arm_ik/{left,right}/status` | `std_msgs/String` (JSON) | `state: idle|traj|fine|reached|failed`, `err_pos_m`, `err_rot_rad` |
 | `~/solve` | `arm_ik/srv/SolveIK` | решить IK без движения (для планировщика верхнего уровня) |
+
+Для абсолютных целей при недостижимой ориентации включается запасной режим: IK
+пытается достичь позиции без фиксации ориентации и оставляет кисть в реально
+достижимой ориентации. В лог выводится `requested orientation relaxed`.
+Для чистых линейных delta-команд используется position-only задача, чтобы
+не блокировать перемещение лишним ограничением ориентации. Чистые вращения
+по-прежнему решаются как полная поза с фиксированной позицией TCP.
 
 ## 6. Как это работает внутри (по этапам)
 

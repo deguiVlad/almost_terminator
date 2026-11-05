@@ -323,7 +323,11 @@ def build_side_config_from_urdf(urdf_xml, base_frame, side):
         if p is not None and c is not None:
             joints[j.get("name")] = j
             children[p.get("link")].append((j.get("name"), c.get("link")))
-    tip = "L_base_link" if side == "left" else "R_base_link"
+    candidates = ("left_tcp_link", "L_base_link") if side == "left" else ("right_tcp_link", "R_base_link")
+    available_links = {link.get("name") for link in root.findall("link")}
+    tip = next((name for name in candidates if name in available_links), None)
+    if tip is None:
+        raise ValueError("URDF is missing TCP link; expected one of %s" % (candidates,))
     stack, path = [(base_frame, [])], None
     while stack:
         link, chain = stack.pop()
@@ -459,51 +463,18 @@ def apply_limits(cfg, limits):
 def build_models_from_tf(static_msgs, dynamic_msgs, joint_names, base_frame,
                          urdf_xml=None, tip_hints=None, tcp_offsets=None,
                          logger=None):
-    """Сообщения /tf + /tf_static -> {'left': ArmModel, 'right': ArmModel}.
+    """Deprecated compatibility entry point.
 
-    Возвращает dict (возможно неполый — нода сама решает, хватит ли одного
-    комплекта или нужен fallback на файл). Пустой dict — если в дереве нет
-    ни одной руки.
+    Joint axes cannot be recovered from current TF transforms. Use a URDF
+    description; TF-only reconstruction is rejected rather than returning a
+    plausible-looking but physically incorrect arm model.
     """
-    from arm_ik.kinematics import arm_from_dict
-
-    def log(level, text):
-        if logger is not None:
-            getattr(logger, level)(text)
-
-    if urdf_xml:
-        try:
-            models = build_models_from_urdf(urdf_xml, base_frame, logger)
-            if len(models) == 2:
-                return models
-            log("warn", f"URDF chain unavailable for base={base_frame}; trying TF fallback")
-        except Exception as exc:
-            log("error", f"URDF parsing failed: {exc}")
-    edges = tf_edges(list(static_msgs or []) + list(dynamic_msgs or []))
-    if not edges:
-        log("warn", "TF-дерево пустое (/tf, /tf_static) — модель не собрана")
-        return {}
-    constants = tf_constants(dynamic_msgs, static_msgs)
-
-    # имена суставов: из /joint_states + все подходящие stems активных рёбер
-    names = set(joint_names or [])
-    for p, c in edges:
-        if is_arm_joint(c):
-            names.add(c.replace("_link", "_joint")
-                      if c.endswith("_link") else c)
-    limits = limits_from_urdf(urdf_xml) or fallback_limits()
-
-    out = {}
-    for side in ("left", "right"):
-        cfg = build_side_config(edges, constants, sorted(names), base_frame,
-                                side, tip_hint=(tip_hints or {}).get(side))
-        if cfg is None:
-            log("warn", f"[{side}] цепочка руки в дереве TF не найдена")
-            continue
-        apply_limits(cfg, limits)
-        if tcp_offsets and side in tcp_offsets:
-            cfg["tcp_offset"] = list(tcp_offsets[side])
-        out[side] = arm_from_dict(cfg)
-        log("info", f"[{side}] IK-цепочка из TF: {len(cfg['joints'])} звеньев, "
-                    f"tip={cfg['tip_link']}, base={base_frame}")
-    return out
+    if not urdf_xml:
+        raise ValueError(
+            "TF-only arm model reconstruction is unsafe: provide the URDF XML "
+            "through urdf_xml or use arm_ik.urdf_model.build_models_from_urdf")
+    from arm_ik.urdf_model import build_models_from_urdf
+    models = build_models_from_urdf(urdf_xml, base_link=base_frame)
+    if logger is not None:
+        logger.info("Built arm models from URDF; TF data is not used for joint axes")
+    return models

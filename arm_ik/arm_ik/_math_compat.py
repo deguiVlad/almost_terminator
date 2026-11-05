@@ -148,6 +148,25 @@ except Exception:  # окружение без numpy/scipy — чистый Pyth
         def as_rotvec(self):
             return _pn._Array(_matrix_to_rotvec(self._m))
 
+        def as_euler(self, seq, degrees=False):
+            """Return intrinsic XYZ Euler angles, matching scipy Rotation."""
+            if seq != "xyz":
+                raise NotImplementedError("fallback supports only Euler sequence 'xyz'")
+            m = self._m
+            cy = math.sqrt(m[0][0] * m[0][0] + m[1][0] * m[1][0])
+            if cy > 1e-9:
+                x = math.atan2(m[2][1], m[2][2])
+                y = math.atan2(-m[2][0], cy)
+                z = math.atan2(m[1][0], m[0][0])
+            else:
+                x = math.atan2(-m[1][2], m[1][1])
+                y = math.atan2(-m[2][0], cy)
+                z = 0.0
+            angles = [x, y, z]
+            if degrees:
+                angles = [math.degrees(v) for v in angles]
+            return _pn._Array(angles)
+
         def as_quat(self):
             return _matrix_to_quat_xyzw(self._m)
 

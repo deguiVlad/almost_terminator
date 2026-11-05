@@ -163,6 +163,7 @@ class ArmIKNode(Node):
         self.declare_parameter("delta_accumulate", True)       # потоковые delta-команды накапливаются от последней цели
         self.declare_parameter("delta_max_lin", 0.35)          # предохранитель на одну команду, м
         self.declare_parameter("delta_max_rot", 1.2)           # предохранитель на одну команду, рад
+        self.declare_parameter("delta_rotation_frame", "base") # base | tcp
         # --- встроенные демо-паблишеры (заменяют отдельные ноды demo_*) ---
         self.declare_parameter("demo_goals", False)   # публиковать PoseStamped-цели
         self.declare_parameter("demo_delta", False)   # публиковать TwistStamped-дельты
@@ -219,6 +220,7 @@ class ArmIKNode(Node):
         self.delta_accum = bool(self.get_parameter("delta_accumulate").value)
         self.delta_max_lin = float(self.get_parameter("delta_max_lin").value)
         self.delta_max_rot = float(self.get_parameter("delta_max_rot").value)
+        self.delta_rotation_frame = str(self.get_parameter("delta_rotation_frame").value).lower()
 
         # ---------------- состояние ----------------
         self.joints = {}
@@ -603,7 +605,7 @@ class ArmIKNode(Node):
         T[:3, 3] = [t.x, t.y, t.z]
         return T
 
-    def set_goal(self, side, T_des):
+    def set_goal(self, side, T_des, position_only=False, allow_position_fallback=True):
         """Общий конвейер: IK -> траектория (с защитой стола) -> исполнение."""
         if not self._tf_models_ready:
             self.get_logger().warn(f"[{side}] IK rejected: URDF model is not ready")
@@ -632,6 +634,8 @@ class ArmIKNode(Node):
 
         # 1) IK: multi-seed DLS с барьером стола
         seeds = self.seed_poses(model, q_now)
+        task_mask = ([True, True, True, False, False, False]
+                     if position_only else [True] * 6)
         q_sol, ok, epos, erot = ik_multi_seed(
             model, T_des_model, seeds, max_iter=350, tol_pos=self.tol_pos * 0.5,
             tol_rot=self.tol_rot * 0.5, barrier=barrier,
@@ -647,7 +651,7 @@ class ArmIKNode(Node):
         if ok and not bad:
             ex.traj = joint_space_profile(q_now, q_sol, self.spd, self.a_max, dt)
             ex.idx, ex.state, ex.fine_cycles = 0, ArmExecutor.TRAJ, 0
-            ex.last_T_des = T_des.copy()
+            ex.last_T_des = np.linalg.inv(T_model_base) @ T_des_model
             self.get_logger().info(
                 f"[{side}] IK решена: {len(ex.traj)} точек (~{(len(ex.traj)-1)/self.rate_hz:.1f} c)")
             return True
@@ -757,8 +761,9 @@ class ArmIKNode(Node):
         self.get_logger().info(
             f"[{side}] delta-цель: dp=({dpos[0]:+.3f},{dpos[1]:+.3f},{dpos[2]:+.3f}) м, "
             f"dr=({drot[0]:+.3f},{drot[1]:+.3f},{drot[2]:+.3f}) рад "
-            f"[ref={'last_goal' if use_last else 'measured'}]")
-        self.set_goal(side, T_des)
+            f"[ref={'last_goal' if use_last else 'measured'}, rot_frame={self.delta_rotation_frame}]")
+        self.set_goal(side, T_des, position_only=(nl > 1e-9 and nr < 1e-9),
+                      allow_position_fallback=False)
 
     # ------------------------------------------------------------ service
     def solve_srv(self, req, res):

@@ -199,3 +199,32 @@ def test_arm_from_dict_roundtrip(model):
     m = arm_from_dict(data)
     assert len(m.joints) == 7 and m.side == model.side
     assert m.names == model.names and m.ids == model.ids
+
+ 
+def test_position_only_ik_reaches_target_position(model):
+    from arm_ik.kinematics import fk, ik_dls
+    q0 = np.array([0.1, -0.2, 0.3, -0.9, 0.2, 0.4, -0.1])
+    T0, _ = fk(model, q0)
+    T_goal = T0.copy()
+    T_goal[:3, 3] = T_goal[:3, 3] + np.array([0.015, -0.01, 0.02])
+    q_sol, ok, _ = ik_dls(
+        model, T_goal, q0, max_iter=300, tol_pos=0.003,
+        task_mask=[True, True, True, False, False, False])
+    assert ok
+    T_sol, _ = fk(model, q_sol)
+    assert np.linalg.norm(T_sol[:3, 3] - T_goal[:3, 3]) < 0.003
+
+
+def test_orientation_only_task_mask_converges(model):
+    from arm_ik.kinematics import fk, ik_dls, pose_error
+    from arm_ik._math_compat import Rotation
+    q0 = np.array([0.1, -0.2, 0.3, -0.9, 0.2, 0.4, -0.1])
+    T0, _ = fk(model, q0)
+    T_goal = T0.copy()
+    T_goal[:3, :3] = Rotation.from_rotvec([0.0, 0.0, 0.12]).as_matrix() @ T0[:3, :3]
+    q_sol, ok, _ = ik_dls(
+        model, T_goal, q0, max_iter=300, tol_rot=0.01,
+        task_mask=[False, False, False, True, True, True])
+    assert ok
+    T_sol, _ = fk(model, q_sol)
+    assert np.linalg.norm(pose_error(T_sol, T_goal)[3:]) < 0.01

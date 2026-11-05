@@ -62,6 +62,7 @@ def launch_setup(context, *args, **kwargs):
         "kinematics_base_frame": LaunchConfiguration("kinematics_base_frame").perform(context),
         "delta_reference": LaunchConfiguration("delta_reference").perform(context),
         "delta_accumulate": b("delta_accumulate"),
+        "delta_rotation_frame": LaunchConfiguration("delta_rotation_frame").perform(context),
         "enable_table_guard": b("table_guard"),
         # встроенные демо-паблишеры (внутри той же ноды)
         "demo_goals": b("demo"),
@@ -98,6 +99,7 @@ def generate_launch_description():
         d("kinematics_base_frame", "waist_yaw_link", "база URDF-цепочки обеих рук"),
         d("delta_reference", "measured", "опора delta-целей: measured | last_goal"),
         d("delta_accumulate", "false", "суммировать серию delta-смещений"),
+        d("delta_rotation_frame", "base", "оси вращения delta: base | tcp"),
         d("demo", "false", "нода сама публикует абсолютные цели (PoseStamped)"),
         d("goal_x", "0.45", "демо: x цели, м"),
         d("goal_y_left", "0.25", "демо: y левой руки, м"),

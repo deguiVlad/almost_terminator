@@ -192,43 +192,46 @@ def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
     q = np.asarray(q_init, dtype=float).copy()
     W = np.eye(len(model.joints)) if weight is None else np.diag(weight)
 
-    if task_mask is None:
-        active = np.arange(6, dtype=int)
-    else:
-        mask = np.asarray(task_mask, dtype=bool)
-        if mask.shape != (6,):
-            raise ValueError("task_mask must contain exactly 6 booleans")
-        active = np.flatnonzero(mask)
-    if active.size == 0:
+    if task_mask is not None and len(task_mask) != 6:
+        raise ValueError("task_mask must contain exactly 6 booleans")
+    active = [i for i in range(6)
+              if task_mask is None or bool(task_mask[i])]
+    if not active:
         raise ValueError("task_mask must enable at least one Cartesian dimension")
 
-    pos_active = bool(np.any(active < 3))
-    rot_active = bool(np.any(active >= 3))
+    pos_rows = [i for i in active if i < 3]
+    rot_rows = [i for i in active if i >= 3]
     task_weights = np.asarray(task_weights, dtype=float)
     if (task_weights.shape != (2,) or np.any(~np.isfinite(task_weights))
             or np.any(task_weights <= 0.0)):
         raise ValueError("task_weights must be two positive values: (position, rotation)")
-    full_scale = np.array([task_weights[0]] * 3 + [task_weights[1]] * 3,
-                          dtype=float)
-    active_scale = full_scale[active]
+    full_scale = [float(task_weights[0])] * 3 + [float(task_weights[1])] * 3
+    active_scale = [full_scale[i] for i in active]
     hist = []
 
     def task_norm(error):
-        return float(np.linalg.norm(active_scale * error[active]))
+        return math.sqrt(sum((active_scale[k] * float(error[row])) ** 2
+                             for k, row in enumerate(active)))
 
     def is_converged(error):
-        pos_ok = (not pos_active) or np.linalg.norm(error[:3][active[active < 3]]) <= tol_pos
-        rot_ok = (not rot_active) or np.linalg.norm(error[3:][active[active >= 3] - 3]) <= tol_rot
-        return bool(pos_ok and rot_ok)
+        pos_err = math.sqrt(sum(float(error[i]) ** 2 for i in pos_rows))
+        rot_err = math.sqrt(sum(float(error[i]) ** 2 for i in rot_rows))
+        return (pos_err <= tol_pos if pos_rows else True) and (
+            rot_err <= tol_rot if rot_rows else True)
 
     def _step(cur_q, error, damp_cur):
-        J = geometric_jacobian(model, cur_q)[active, :]
-        J_task = active_scale[:, None] * J
-        e_task = active_scale * error[active]
+        J_full = geometric_jacobian(model, cur_q)
+        J = np.array([[float(J_full[row][col])
+                       for col in range(len(model.joints))]
+                      for row in active], dtype=float)
+        e_task = np.array([active_scale[k] * float(error[row])
+                           for k, row in enumerate(active)], dtype=float)
+        J_task = np.array([[active_scale[k] * float(J[k][col])
+                            for col in range(len(model.joints))]
+                           for k in range(len(active))], dtype=float)
         JW = J_task @ W
-        A = JW @ J_task.T + (damp_cur ** 2) * np.eye(active.size)
-        solve_error = np.linalg.solve(A, e_task)
-        dq = W @ J_task.T @ solve_error
+        A = JW @ J_task.T + (damp_cur ** 2) * np.eye(len(active))
+        dq = W @ J_task.T @ np.linalg.solve(A, e_task)
         if barrier is not None:
             dq = dq + barrier(cur_q)
         if null_gain > 0.0 and q_prefer is not None:

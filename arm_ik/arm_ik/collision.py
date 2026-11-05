@@ -35,11 +35,13 @@ class TableGuard:
     def inside_xy(self, p):
         return (self.x0 <= p[0] <= self.x1) and (abs(p[1]) <= self.y_half)
 
-    def penetration(self, p):
-        """Глубина проникновения точки под стол (0 если всё ок)."""
-        if self.inside_xy(p):
-            d = (self.h + self.margin) - p[2]
-            return max(0.0, d)
+    def penetration(self, p, link_radius=0.0):
+        """Penetration depth with an optional conservative XY link radius."""
+        x, y, z = (float(v) for v in p)
+        inside = (self.x0 - link_radius <= x <= self.x1 + link_radius
+                  and abs(y) <= self.y_half + link_radius)
+        if inside:
+            return max(0.0, (self.h + self.margin) - z)
         return 0.0
 
     def _points(self, model, q, T_guard_model=None):
@@ -104,14 +106,14 @@ class TableGuard:
     def _cost(self, pts, link_radius):
         c = 0.0
         for p in pts:
-            d = self.penetration(p - np.array([0, 0, link_radius]))
+            d = self.penetration(p - np.array([0, 0, link_radius]), link_radius)
             c += d * d
         return c
 
     def blocks_T(self, T44):
         """True, если позиция из 4x4 позы попадает под стол (с запасом)."""
         p = [float(v) for v in T44[:3, 3]]
-        return self.penetration(np.array(p)) > 0.0
+        return self.penetration(np.array(p), link_radius=0.05) > 0.0
 
     def clamp_goal(self, T44):
         """Возвращает копию T44 с z цели, поднятым над столом+запас."""
@@ -127,6 +129,9 @@ class TableGuard:
             raise ValueError("target position must contain three finite values")
         if not np.isfinite(float(link_radius)) or link_radius < 0.0:
             raise ValueError("link_radius must be finite and non-negative")
-        if self.inside_xy(p):
+        expanded_inside = (
+            self.x0 - link_radius <= p[0] <= self.x1 + link_radius
+            and abs(p[1]) <= self.y_half + link_radius)
+        if expanded_inside:
             p[2] = max(p[2], self.h + self.margin + float(link_radius))
         return p

@@ -17,7 +17,10 @@ _ARM_JOINTS = (
     "shoulder_pitch", "shoulder_roll", "shoulder_yaw",
     "elbow_pitch", "elbow_yaw", "wrist_pitch", "wrist_roll",
 )
-_TIP_LINKS = {"left": "L_base_link", "right": "R_base_link"}
+_TIP_LINK_CANDIDATES = {
+    "left": ("left_tcp_link", "L_base_link"),
+    "right": ("right_tcp_link", "R_base_link"),
+}
 
 
 def _vec(text, default):
@@ -60,8 +63,17 @@ def build_arm_model(urdf_xml, side, base_link="waist_yaw_link",
     """Parse one arm model; fixed joints are folded into adjacent origins/TCP."""
     if side not in ("left", "right"):
         raise ValueError("side must be 'left' or 'right'")
-    tip_link = tip_link or _TIP_LINKS[side]
     root = ET.fromstring(urdf_xml)
+    if tip_link is None:
+        available_links = {link.get("name") for link in root.findall("link")}
+        tip_link = next(
+            (candidate for candidate in _TIP_LINK_CANDIDATES[side]
+             if candidate in available_links),
+            None)
+        if tip_link is None:
+            raise ValueError(
+                "URDF has no known %s TCP link; expected one of %s" %
+                (side, _TIP_LINK_CANDIDATES[side]))
     joints_xml = list(root.findall("joint"))
     joint_by_child = {}
     for joint in joints_xml:

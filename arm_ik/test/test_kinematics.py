@@ -9,8 +9,7 @@
 pure-python массивы с numpy-объектами и падали бы на импортах. np здесь —
 это либо настоящий numpy, либо чистый Python fallback (одинаковый API).
 
-Файловые тесты (URDF-скрипты, config/*.json) из пакета вычищены: дерево
-цепочка звеньев и limits берутся из URDF (см. test_urdf_model.py).
+Кинематические цепи и limits проверяются отдельно в test_urdf_model.py.
 """
 import math
 import os
@@ -26,7 +25,7 @@ from arm_ik._math_compat import np  # тот же слой, что исполь�
 
 @pytest.fixture(scope="module")
 def model():
-    """Стартовая шаблонная модель правой руки (заглушка до получения /tf)."""
+    """Шаблонная модель правой руки только для математических unit-тестов."""
     from arm_ik.kinematics import make_default_arm
     return make_default_arm("right")
 
@@ -126,10 +125,17 @@ def test_trajectory_speed_limit():
     q0 = np.array([0.0] * 7)
     q1 = np.array([0.9, -0.9, 0.8, -1.2, 0.7, -0.6, 0.5])
     prof = joint_space_profile(q0, q1, v_max=0.8, a_max=2.0, dt=0.02)
+    dmax = max(abs(float(a) - float(b)) for a, b in zip(q1, q0))
+    if dmax <= 0.8 ** 2 / 2.0:
+        duration = 2.0 * math.sqrt(max(dmax, 1e-12) / 2.0)
+    else:
+        duration = dmax / 0.8 + 0.8 / 2.0
+    duration = max(duration, 0.02)
+    sample_dt = duration / (len(prof) - 1)
     vmax = 0.0
     for k in range(1, len(prof)):
         for j in range(7):
-            vmax = max(vmax, abs(float(prof[k][j]) - float(prof[k - 1][j])) / 0.02)
+            vmax = max(vmax, abs(float(prof[k][j]) - float(prof[k - 1][j])) / sample_dt)
     assert vmax <= 0.8 + 1e-6, f"скорость {vmax} превысила лимит 0.8 рад/с"
     assert _close(prof[-1], q1, atol=1e-6)
 

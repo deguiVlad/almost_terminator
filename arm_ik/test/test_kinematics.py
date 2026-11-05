@@ -263,3 +263,23 @@ def test_trajectory_rejects_invalid_limits():
         joint_space_profile(q, q, dt=-0.01)
 
 
+
+
+def test_table_guard_transforms_kinematic_chain_into_table_frame():
+    from arm_ik.kinematics import ArmModel, JointSpec
+    from arm_ik.collision import TableGuard
+
+    joints = [
+        JointSpec("j1", 1, np.array([0.0, 0.0, 1.0]),
+                  np.array([0.0, 0.0, 0.8]), np.zeros(3), -1.0, 1.0),
+        JointSpec("j2", 2, np.array([0.0, 0.0, 1.0]),
+                  np.array([1.5, 0.0, 0.0]), np.zeros(3), -1.0, 1.0),
+    ]
+    model = ArmModel("left", joints, "tip", tcp_offset=np.zeros(3))
+    guard = TableGuard(h_table=0.9, x0=0.35, x1=1.2,
+                       y_half=0.5, margin=0.02)
+    assert guard.collides_with_table(model, np.zeros(2))
+    T_table_model = np.eye(4)
+    T_table_model[2, 3] = 0.3
+    assert not guard.collides_with_table(
+        model, np.zeros(2), T_guard_model=T_table_model)

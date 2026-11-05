@@ -351,37 +351,34 @@ class ArmIKNode(Node):
                 "рекомендуется ros2 launch ... use_sim_time:=true")
 
     def on_robot_desc(self, msg):
-        """Полный URDF из robot_description — источник кинематики и лимитов."""
-        try:
-            self._urdf_xml = str(msg.data)
+        """Receive the transient-local robot_description string."""
+        xml = str(msg.data).strip()
+        if xml:
+            self._urdf_xml = xml
             self.try_build_urdf_model()
-        except Exception:
-            pass
 
     def try_build_urdf_model(self):
-        """Load exact arm chains and joint limits from URDF.
+        """Load exact arm chains and joint limits from a file or robot_description.
 
         TF alone is deliberately not accepted as a kinematic source: it cannot
-        recover the original joint axes, types or hard position limits.
+        recover the original joint axes, joint types or hard position limits.
         """
         if self._models_ready:
             return True
 
-        urdf_xml = self._urdf_xml
+        candidates = []
         if self.urdf_path:
             try:
                 with open(self.urdf_path, "r", encoding="utf-8") as stream:
-                    urdf_xml = stream.read()
+                    candidates.append(("file", stream.read()))
             except OSError as exc:
-                if urdf_xml is None:
-                    key = str(exc)
-                    if getattr(self, "_last_urdf_error", None) != key:
-                        self.get_logger().warning(
-                            f"URDF file unavailable ({self.urdf_path}); waiting for "
-                            f"/robot_description: {exc}")
-                        self._last_urdf_error = key
+                self._log_urdf_error("file:" + str(exc),
+                                     f"URDF file unavailable ({self.urdf_path}): {exc}")
 
-        if not urdf_xml:
+        if self._urdf_xml:
+            candidates.append(("/robot_description", self._urdf_xml))
+
+        if not candidates:
             if not getattr(self, "_urdf_missing_warned", False):
                 self.get_logger().warning(
                     "URDF is not available. Set urdf_path or publish transient-local "
@@ -389,35 +386,45 @@ class ArmIKNode(Node):
                 self._urdf_missing_warned = True
             return False
 
-        try:
-            from arm_ik.urdf_model import build_models_from_urdf
-            models = build_models_from_urdf(
-                urdf_xml, base_link=self.kinematics_base_frame)
-            if set(models) != {"left", "right"}:
-                raise ValueError("URDF parser did not produce both arm models")
-            for side, model in models.items():
-                if len(model.joints) != 7:
-                    raise ValueError(f"{side} arm must have exactly 7 movable joints")
-                if len(set(model.ids)) != 7 or any(mid <= 0 for mid in model.ids):
-                    raise ValueError(f"{side} arm has invalid or duplicate motor IDs")
-                model.base_frame = self.kinematics_base_frame
+        from arm_ik.urdf_model import build_models_from_urdf
+        for source, xml in candidates:
+            try:
+                models = build_models_from_urdf(
+                    xml, base_link=self.kinematics_base_frame)
+                if set(models) != {"left", "right"}:
+                    raise ValueError("URDF parser did not produce both arm models")
 
-            self.models = models
-            for side, model in models.items():
-                self.exec[side].model = model
-            self._models_ready = True
-            self.get_logger().info(
-                "Exact IK models loaded from URDF: " + "; ".join(
-                    f"{side}: {model.names[0]}..{model.names[-1]} -> {model.tip_link}, "
-                    f"motor_ids={model.ids}"
-                    for side, model in models.items()))
-            return True
-        except Exception as exc:
-            key = str(exc)
-            if getattr(self, "_last_urdf_error", None) != key:
-                self.get_logger().error(f"Failed to build IK models from URDF: {exc}")
-                self._last_urdf_error = key
-            return False
+                all_motor_ids = []
+                for side, model in models.items():
+                    if len(model.joints) != 7:
+                        raise ValueError(f"{side} arm must have exactly 7 movable joints")
+                    if len(set(model.ids)) != 7 or any(mid <= 0 for mid in model.ids):
+                        raise ValueError(f"{side} arm has invalid or duplicate motor IDs")
+                    model.base_frame = self.kinematics_base_frame
+                    all_motor_ids.extend(model.ids)
+                if len(set(all_motor_ids)) != 14:
+                    raise ValueError("left/right arm motor IDs must be globally unique")
+
+                self.models = models
+                for side, model in models.items():
+                    self.exec[side].model = model
+                self._models_ready = True
+                self.get_logger().info(
+                    f"Exact IK models loaded from {source}: " + "; ".join(
+                        f"{side}: {model.names[0]}..{model.names[-1]} -> {model.tip_link}, "
+                        f"motor_ids={model.ids}"
+                        for side, model in models.items()))
+                return True
+            except Exception as exc:
+                self._log_urdf_error(source + ":" + str(exc),
+                                     f"Failed to build IK models from {source}: {exc}")
+
+        return False
+
+    def _log_urdf_error(self, key, message):
+        if getattr(self, "_last_urdf_error", None) != key:
+            self.get_logger().error(message)
+            self._last_urdf_error = key
 
     def _demo_sides(self):
         side = str(self.get_parameter("demo_side").value)

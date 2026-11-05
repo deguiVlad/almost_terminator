@@ -316,7 +316,7 @@ class ArmIKNode(Node):
 
         self.get_logger().info(
             f"arm_ik_node ready | tips={[m.tip_link for m in self.models.values()]} | "
-            f"model=URDF{' (ждём дерево)' if not self._models_ready else ' (получено)'} | "
+            f"model=URDF{' (ждём URDF)' if not self._models_ready else ' (получено)'} | "
             f"guard={'ON h=%.2f' % self.guard.h if self.guard else 'OFF'} | "
             f"srv={'on' if HAVE_SRV else 'off (нет сгенерированного arm_ik.srv)'}")
 
@@ -405,7 +405,6 @@ class ArmIKNode(Node):
                 for side, model in models.items():
                     model.base_frame = self.kinematics_base_frame
                     self.exec[side].model = model
-                self._models_ready = True
                 self._models_ready = True
                 self._urdf_wait_warned = False
                 self.get_logger().info(

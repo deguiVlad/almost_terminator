@@ -199,6 +199,9 @@ class ArmIKNode(Node):
                                 self.get_parameter("table_y_half").value,
                                 self.get_parameter("table_margin").value) \
             if self.get_parameter("enable_table_guard").value else None
+        if self.guard is not None and self.base_frame != self.kinematics_base_frame:
+            raise ValueError(
+                "table guard currently requires base_frame == kinematics_base_frame")
 
         self.rate_hz = float(self.get_parameter("rate_hz").value)
         self.joint_state_timeout = float(self.get_parameter("joint_state_timeout").value)

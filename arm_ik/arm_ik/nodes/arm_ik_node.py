@@ -153,10 +153,9 @@ class ArmIKNode(Node):
         self.declare_parameter("waypoint_lift", 0.25)  # заход сверху, м (FOCUS_TRACKING §Шаг2)
         self.declare_parameter("n_seeds", 12)          # расширенный набор стартов IK
         self.declare_parameter("tcp_offset", "")         # "x,y,z" поверх TF-цепочки (переопределить кончик)
-        # --- источник дерева звеньев для IK ---
-        # Единственный источник — топики симулятора /tf и /tf_static
-        # (модуль arm_ik.tree_from_tf); файловые режимы (URDF/JSON-конфиги)
-        # из пакета вычищены полностью.
+        # --- источник кинематической модели ---
+        # URDF из urdf_path или /robot_description; TF используется только
+        # для преобразования целевых поз между frame_id.
         # --- параметры delta-целей (TwistStamped на /arm_ik/delta_{left,right}) ---
         self.declare_parameter("delta_reference", "measured")  # measured | last_goal
         self.declare_parameter("delta_accumulate", True)       # потоковые delta-команды накапливаются от последней цели
@@ -176,25 +175,26 @@ class ArmIKNode(Node):
         self.declare_parameter("demo_dz", 0.0)        # delta: смещение вверх, м
         self.declare_parameter("demo_period", 8.0)    # с между публикациями
 
-        self.base_frame = self.get_parameter("base_frame").value
-        self.kinematics_base_frame = self.get_parameter("kinematics_base_frame").value
+        self.base_frame = str(self.get_parameter("base_frame").value).strip()
+        self.kinematics_base_frame = str(
+            self.get_parameter("kinematics_base_frame").value).strip()
         self.urdf_path = str(self.get_parameter("urdf_path").value).strip()
-        # ---------------- источник дерева звеньев для IK ----------------
-        # Цепочка звеньев строится из топиков симулятора /tf и /tf_static
-        # (см. arm_ik.tree_from_tf); файлы URDF/JSON не читаются.
-        # стартовые модели — встроенная заглушка (нужны сразу для FK/телеметрии),
-        # затем перезаменяются деревом из /tf+/tf_static, как только оно появится
-        # в буфере TF2.
+        if not self.base_frame or not self.kinematics_base_frame:
+            raise ValueError("base_frame and kinematics_base_frame must be non-empty")
+        # Offline fallback models are for unit tests only. The command loop is
+        # gated until a valid two-arm URDF model has been parsed.
         self.models = {"left": make_default_arm("left"),
                        "right": make_default_arm("right")}
         self._models_ready = False
         for m in self.models.values():
             m.base_frame = self.kinematics_base_frame
-        tof = self.get_parameter("tcp_offset").value
+        tof = str(self.get_parameter("tcp_offset").value).strip()
+        self.tcp_offset_override = None
         if tof:
-            v = [float(t) for t in str(tof).split(",")]
-            for m in self.models.values():
-                m.tcp_offset = np.array(v)
+            v = [float(t.strip()) for t in tof.split(",")]
+            if len(v) != 3 or not all(math.isfinite(x) for x in v):
+                raise ValueError("tcp_offset must contain exactly three finite comma-separated values")
+            self.tcp_offset_override = np.asarray(v, dtype=float)
 
         self.guard = TableGuard(self.get_parameter("h_table").value,
                                 self.get_parameter("table_x0").value,
@@ -213,7 +213,7 @@ class ArmIKNode(Node):
         self.tol_pos = float(self.get_parameter("tol_pos").value)
         self.tol_rot = float(self.get_parameter("tol_rot").value)
         self.kp = float(self.get_parameter("kp").value)
-        self.ik_rotation_weight = max(0.05, float(self.get_parameter("ik_rotation_weight").value))
+        self.ik_rotation_weight = float(self.get_parameter("ik_rotation_weight").value)
         self.fine_max = int(self.get_parameter("fine_max_cycles").value)
         self.lift = float(self.get_parameter("waypoint_lift").value)
         self.n_seeds = int(self.get_parameter("n_seeds").value)
@@ -226,7 +226,9 @@ class ArmIKNode(Node):
         positive_parameters = {
             "rate_hz": self.rate_hz, "joint_state_timeout": self.joint_state_timeout, "spd_limit": self.spd,
             "a_max": self.a_max, "tol_pos": self.tol_pos,
-            "tol_rot": self.tol_rot, "delta_max_lin": self.delta_max_lin,
+            "tol_rot": self.tol_rot, "kp": self.kp,
+            "ik_rotation_weight": self.ik_rotation_weight,
+            "waypoint_lift": self.lift, "delta_max_lin": self.delta_max_lin,
             "delta_max_rot": self.delta_max_rot,
         }
         for name, value in positive_parameters.items():
@@ -408,6 +410,8 @@ class ArmIKNode(Node):
                 self.models = models
                 for side, model in models.items():
                     model.base_frame = self.kinematics_base_frame
+                    if self.tcp_offset_override is not None:
+                        model.tcp_offset = self.tcp_offset_override.copy()
                     self.exec[side].model = model
                 self._models_ready = True
                 self._urdf_wait_warned = False

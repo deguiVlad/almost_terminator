@@ -471,7 +471,7 @@ class ArmIKNode(Node):
         fid = goal.header.frame_id
         if fid in ("", self.base_frame):
             return pose_to_T(goal.pose)
-        stamp = (rclpy.time.Time.from_msg(goal.header.stamp)
+        stamp = (Time.from_msg(goal.header.stamp)
                  if goal.header.stamp.sec or goal.header.stamp.nanosec
                  else Time())
         tfm = self.tf_buffer.lookup_transform(self.base_frame, fid, stamp,
@@ -531,8 +531,8 @@ class ArmIKNode(Node):
         if target_frame == source_frame:
             return np.eye(4)
         tfm = self.tf_buffer.lookup_transform(
-            target_frame, source_frame, rclpy.time.Time(),
-            timeout=rclpy.duration.Duration(seconds=0.5))
+            target_frame, source_frame, Time(),
+            timeout=Duration(seconds=0.5))
         t, r = tfm.transform.translation, tfm.transform.rotation
         T = np.eye(4)
         T[:3, :3] = Rotation.from_quat([r.x, r.y, r.z, r.w]).as_matrix()
@@ -541,7 +541,7 @@ class ArmIKNode(Node):
 
     def set_goal(self, side, T_des, position_only=False):
         """Общий конвейер: IK -> траектория (с защитой стола) -> исполнение."""
-        if not self._tf_models_ready:
+        if not self._models_ready:
             self.get_logger().warn(f"[{side}] IK rejected: URDF model is not ready")
             return False
         ex = self.exec[side]
@@ -629,7 +629,7 @@ class ArmIKNode(Node):
 
     def on_goal(self, side, goal: PoseStamped):
         """Абсолютная шестимерная цель TCP (PoseStamped)."""
-        if not self._tf_models_ready:
+        if not self._models_ready:
             self.get_logger().warn(f"[{side}] goal rejected: waiting for /robot_description")
             return
         try:
@@ -658,7 +658,7 @@ class ArmIKNode(Node):
         delta_accumulate=true — дельты суммируются от опорной точки первой дельты
         серии (джойстик-режим: каждая новая команда двигает дальше).
         """
-        if not self._tf_models_ready:
+        if not self._models_ready:
             self.get_logger().warn(f"[{side}] delta rejected: URDF model is not ready")
             return
         ex = self.exec[side]
@@ -668,8 +668,8 @@ class ArmIKNode(Node):
         if fid not in ("", self.base_frame):
             try:
                 tfm = self.tf_buffer.lookup_transform(
-                    self.base_frame, fid, rclpy.time.Time(),
-                    timeout=rclpy.duration.Duration(seconds=0.2))
+                    self.base_frame, fid, Time(),
+                    timeout=Duration(seconds=0.2))
                 rot = tfm.transform.rotation
                 R_frame_base = Rotation.from_quat([rot.x, rot.y, rot.z, rot.w]).as_matrix()
                 dpos = R_frame_base @ dpos
@@ -726,7 +726,7 @@ class ArmIKNode(Node):
         self.try_build_urdf_model()
         if not getattr(self, "_clock_checked", False):
             self._check_sim_clock()
-        if not self._tf_models_ready:
+        if not self._models_ready:
             return
         # Watchdog использует monotonic wall time, чтобы работать даже при
         # остановленных/отсутствующих ROS simulation clocks.

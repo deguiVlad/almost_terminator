@@ -78,7 +78,7 @@ def _strip_shadowing_paths(here):
 def bootstrap(module_name):
     """Возвращает callable main() пакета arm_ik.nodes.<module_name>.
 
-    module_name: 'arm_ik_node' | 'demo_goal_publisher' | 'demo_delta_publisher'
+    module_name: 'arm_ik_node'
     """
     here = os.path.dirname(os.path.abspath(__file__))
     _strip_shadowing_paths(here)
@@ -160,7 +160,7 @@ def _die_install(missing):
         "и повторите запуск; либо укажите интерпретатор явно:\n"
         "  ARM_IK_PYTHON=/usr/bin/python3 ./bin/run_arm_ik.py\n"
         "(numpy/scipy ставить НЕ нужно — включается pure-python режим;\n"
-        " bodyctrl_msgs можно сделать необязательным: ARM_IK_REQUIRE_BODYCTRL=0)".format(
+        " bodyctrl_msgs опционален по умолчанию; ARM_IK_REQUIRE_BODYCTRL=1 делает его обязательным)".format(
             py=sys.executable, miss=", ".join(missing)),
         file=sys.stderr,
     )

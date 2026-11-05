@@ -357,6 +357,8 @@ def ik_multi_seed(model: ArmModel, T_des44, seeds, n_seeds=None, jitter=None, **
         jitter = float(jitter)
         if not math.isfinite(jitter) or jitter < 0.0:
             raise ValueError("jitter must be finite and non-negative")
+    if n_seeds is not None and len(seeds) > n_seeds:
+        seeds = seeds[:n_seeds]
     if n_seeds and n_seeds > len(seeds):
         base = seeds[0]
         amp = 0.5 if jitter is None else float(jitter)

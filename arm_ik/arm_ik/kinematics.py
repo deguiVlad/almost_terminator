@@ -470,16 +470,16 @@ def delta_to_T(T_ref, dpos=None, drot=None, base_ref=True, delta6=None):
         raise ValueError("T_ref must be a finite 4x4 transform")
     R_delta = Rotation.from_rotvec(drot).as_matrix()
     if base_ref:
-        T[:3, :3] = R_delta @ T_ref[:3, :3]
-        T[:3, 3] = T_ref[:3, 3] + dpos
+        T[:3, :3] = R_delta @ T[:3, :3]
+        T[:3, 3] = T[:3, 3] + dpos
     else:
-        T[:3, :3] = T_ref[:3, :3] @ R_delta
-        T[:3, 3] = T_ref[:3, 3] + T_ref[:3, :3] @ dpos
+        T[:3, :3] = T[:3, :3] @ R_delta
+        T[:3, 3] = T[:3, 3] + T[:3, :3] @ dpos
     return T
 
 
 # ---------------------------------------------------------------------------
-# Встроенные модели рук TienKung 2.0 Pro (стартовая заглушка до TF-дерева)
+# Встроенные модели рук TienKung 2.0 Pro (неактивные тестовые заглушки)
 # ---------------------------------------------------------------------------
 
 _ARM_LIMITS = {

@@ -434,8 +434,8 @@ def delta_to_T(T_ref, dpos=None, drot=None, base_ref=True, delta6=None):
     if drot is None:
         drot = np.zeros(3)
     drot = np.asarray(drot, dtype=float)
-    if len(dpos) != 3 or len(drot) != 3:
-        raise ValueError("dpos and drot must each contain exactly three values")
+    if dpos.shape != (3,) or drot.shape != (3,):
+        raise ValueError("dpos and drot must each be one-dimensional 3-vectors")
     if not np.all(np.isfinite(dpos)) or not np.all(np.isfinite(drot)):
         raise ValueError("delta values must be finite")
     T = np.array(T_ref, dtype=float).copy()

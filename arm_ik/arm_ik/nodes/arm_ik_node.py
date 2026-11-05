@@ -123,6 +123,8 @@ class ArmIKNode(Node):
     def __init__(self):
         super().__init__("arm_ik_node")
         # ---------------- параметры ----------------
+        # TableGuard выключен по умолчанию: URDF-модель работает в waist_yaw_link,
+        # а высота стола должна быть откалибрована именно в этой системе координат.
         # use_sim_time объявляется автоматически базовым классом Node (ROS 2 Humble);
         # ручное declare_parameter("use_sim_time", ...) роняло ноду с
         # ParameterAlreadyDeclaredException — не добавлять.
@@ -139,7 +141,7 @@ class ArmIKNode(Node):
         self.declare_parameter("table_x1", 1.2)
         self.declare_parameter("table_y_half", 1.0)
         self.declare_parameter("table_margin", 0.02)
-        self.declare_parameter("enable_table_guard", True)
+        self.declare_parameter("enable_table_guard", False)
         self.declare_parameter("waypoint_lift", 0.25)  # заход сверху, м (FOCUS_TRACKING §Шаг2)
         self.declare_parameter("n_seeds", 4)           # альтернативных стартов IK
         self.declare_parameter("tcp_offset", "")         # "x,y,z" поверх TF-цепочки (переопределить кончик)
@@ -417,7 +419,7 @@ class ArmIKNode(Node):
             self._tf_models_ready = True
             self._tf_warned = False
             self.get_logger().info(
-                "дерево звеньев IK построено из /tf + /tf_static: " +
+                "кинематическая модель IK построена (приоритет URDF, TF только для frame transforms): " +
                 ", ".join(f"{s}: {m.names[0]}..{m.names[-1]} -> {m.tip_link}"
                           for s, m in self.models.items()))
         return True

@@ -413,6 +413,7 @@ class ArmIKNode(Node):
                     self.exec[side].model = model
                 self._models_ready = True
                 self._urdf_wait_warned = False
+                self._last_urdf_error = None
                 self.get_logger().info(
                     "IK models loaded from %s (base=%s): %s" % (
                         source, self.kinematics_base_frame,
@@ -423,8 +424,10 @@ class ArmIKNode(Node):
             except Exception as exc:
                 errors.append("%s: %s" % (source, exc))
 
-        self.get_logger().error("Could not build arm models from any URDF: %s"
-                                % " | ".join(errors))
+        message = "Could not build arm models from any URDF: %s" % " | ".join(errors)
+        if message != getattr(self, "_last_urdf_error", None):
+            self.get_logger().error(message)
+            self._last_urdf_error = message
         return False
 
     def _demo_sides(self):

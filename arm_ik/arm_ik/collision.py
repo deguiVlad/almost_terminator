@@ -24,10 +24,15 @@ from .kinematics import chain_transforms
 
 class TableGuard:
     def __init__(self, h_table=0.9, x0=0.35, x1=1.2, y_half=1.0, margin=0.02):
-        self.h = h_table      # высота поверхности стола в рамке pelvis
-        self.x0, self.x1 = x0, x1
-        self.y_half = y_half
-        self.margin = margin  # запас, м
+        values = (h_table, x0, x1, y_half, margin)
+        if not all(math.isfinite(float(v)) for v in values):
+            raise ValueError("table geometry parameters must be finite")
+        if x0 >= x1 or y_half <= 0.0 or margin < 0.0:
+            raise ValueError("require x0 < x1, y_half > 0 and margin >= 0")
+        self.h = float(h_table)
+        self.x0, self.x1 = float(x0), float(x1)
+        self.y_half = float(y_half)
+        self.margin = float(margin)
 
     def inside_xy(self, p):
         return (self.x0 <= p[0] <= self.x1) and (abs(p[1]) <= self.y_half)

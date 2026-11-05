@@ -10,7 +10,7 @@
 docs (PoseStamped | TwistStamped)            /joint_states
         │                                          │
         ▼                                          ▼
-  on_goal / on_delta ──► цель T_des (4×4 в pelvis) ──► IK (DLS, multi-seed,
+  on_goal / on_delta ──► цель T_des (4×4 в waist_yaw_link) ──► IK (DLS, multi-seed,
         барьер стола, clip по limits)  ──► q_sol ──► траектория (trapezoid,
         ≤0.8 рад/с, валидация коллизий) ──► /arm/cmd_pos (50 Гц) ──► приводы
                                         ▲
@@ -40,8 +40,7 @@ source install/setup.bash          # source ПОСЛЕДНИМ, чтобы он 
 ros2 pkg prefix arm_ik             # должен показать .../hackathon/ros2/install/arm_ik
 ros2 pkg executables arm_ik        # arm_ik, demo_goal, demo_delta (+ run_*.py в lib/)
 
-# 4) подготовка модели руки из URDF (один раз; см. §4)
-python3 arm_ik/scripts/export_kinematics_from_urdf.py --out arm_ik/config/arms.json
+# 4) URDF автоматически читается из /robot_description или из параметра urdf_path; export arms.json не требуется.
 
 # 5) запуск IK-сервера (постоянная нода, ждёт цели на топиках)
 ros2 launch arm_ik arm_ik.launch.py
@@ -147,44 +146,39 @@ grep -n "import" install/arm_ik/lib/arm_ik/run_arm_ik.py
 python3 -c "import arm_ik, arm_ik.nodes.arm_ik_node as m; print(m.__file__)"
 ```
 
-## 4. Подготовка модели руки (обязательно перед боем)
+## 4. Модель руки из URDF (автоматически)
 
-Шаблонные длины звеньев в `arms_template.json` приблизительны. Снимите точные
-параметры из URDF робота:
+Нода строит кинематические модели обеих рук непосредственно из полного URDF
+`tiangong_pro_with_hands.urdf`. Геометрия, оси и пределы берутся из joint/origin,
+joint/axis и joint/limit; фиксированные соединения после запястья также учитываются
+в TCP-позе, включая поворот hand frame.
 
+По умолчанию читается файл:
 ```bash
-# путь к URDF можно не указывать — скрипт сам найдёт tiangong_pro_with_hands.urdf
-# (ищет в ~/nssr-polygon, ~/, /nssr_sim, /workspace); либо явно:
-python3 scripts/export_kinematics_from_urdf.py \
-    --urdf ~/nssr-polygon/assets/robots/tiangong_pro/tiangong_pro_with_hands.urdf \
-    --out config/arms.json
-
-# TCP = кончик кисти: tip_link берётся из URDF автоматически (обход fixed-цепочки
-# от wrist_roll до листа, обычно hand_{l,r}_link); сместить его можно так:
-#   --tcp-offset 0.1,0,0        # или перебить имя звена: --tip-link-left hand_l_link
-
-# если файл недоступен на диске — возьмите модель с живой системы:
-ros2 topic echo --once /robot_description data | sed -n '2,$p' > /tmp/robot.urdf
-python3 scripts/export_kinematics_from_urdf.py --urdf /tmp/robot.urdf --out config/arms.json
+/home/user/nssr-polygon/assets/robots/tiangong_pro/tiangong_pro_with_hands.urdf
 ```
 
-Если имена суставов в URDF отличаются от канонических (`shoulder_pitch_l_joint` и т.д.
-из `docs/INTERFACES.md`), скрипт подберёт их по ключевым словам; при неоднозначности
-он напечатает список всех суставов — допишите реальное имя в `KEYWORDS`/`MOTOR_IDS`.
+Путь можно переопределить параметром `urdf_path`. Если файл недоступен, нода
+использует transient-local топик `/robot_description`. Модель строится от
+`waist_yaw_link` до `L_base_link` / `R_base_link`, по 7 суставов на руку.
+Публикация целей блокируется до загрузки модели и получения всех семи суставов
+выбранной руки из `/joint_states`.
 
-Узел автоматически подхватит `config/arms.json` (или путь из параметра
-`model_path`; launch ищет его в share-папке пакета). При правке `config/`
-пересоберите пакет (`--symlink-install` подхватывает изменения json на лету).
+Пример запуска с другим путём:
+```bash
+ros2 launch arm_ik arm_ik.launch.py urdf_path:=/path/to/tiangong_pro_with_hands.urdf
+```
 
-Высота стола задаётся параметром `h_table` (м, над `pelvis`) и прямоугольником
-`table_x0/x1/y_half` — измерьте один раз по TF/линейке или по позам объектов.
+TableGuard по умолчанию выключен: параметры `h_table`, `table_x0/x1` и
+`table_y_half` нужно откалибровать именно в `waist_yaw_link`, а не в прежней
+системе `pelvis`. Включайте `enable_table_guard:=true` только после калибровки.
 
 ## 5. Интерфейсы узла
 
 ### 5.1 Абсолютная поза: `geometry_msgs/PoseStamped` на `/arm_ik/goal_left|goal_right`
 
 Шестимерное положение TCP кисти. `header.frame_id` — любая рамка дерева TF
-(узел перенесёт в `pelvis` через TF2); пустая/`pelvis` — уже в корпусе.
+(узел перенесёт в `waist_yaw_link` через TF2); пустая/`waist_yaw_link` — уже в базовой рамке IK.
 Ориентация — кватернион `pose.orientation`.
 
 ```bash
@@ -197,8 +191,8 @@ ros2 topic pub -1 /arm_ik/goal_right geometry_msgs/msg/PoseStamped "{
 ### 5.2 Смещение: `geometry_msgs/TwistStamped` на `/arm_ik/delta_left|delta_right`
 
 Шестимерное **относительное** смещение текущей позы TCP:
-* `twist.linear.{x,y,z}` — dxyz в метрах, ось = `base_frame` (pelvis: x вперёд, y влево, z вверх);
-* `twist.angular.{x,y,z}` — вращение как rotation vector (ось × угол, радианы), тоже в pelvis.
+* `twist.linear.{x,y,z}` — dxyz в метрах в рамке `header.frame_id` (при публикации в иной TF-рамке узел преобразует вектор в `waist_yaw_link`);
+* `twist.angular.{x,y,z}` — rotation vector (ось × угол, радианы) в той же рамке.
 
 Цель вычисляется как `T_new = Δ · T_ref`:
 `p_new = p_ref + dpos`, `R_new = Rot(drot) · R_ref`.

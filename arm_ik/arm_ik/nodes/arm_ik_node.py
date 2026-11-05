@@ -170,12 +170,6 @@ class ArmIKNode(Node):
         self.declare_parameter("demo_dx", 0.05)       # delta: смещение вперёд, м
         self.declare_parameter("demo_dz", 0.0)        # delta: смещение вверх, м
         self.declare_parameter("demo_period", 8.0)    # с между публикациями
-        # 
-        self.declare_parameter("publish_offset", True)
-        self.declare_parameter("offset_topic", "/left_arm/ee_offset")
-        self.declare_parameter("offset_frame", "base")
-        self.declare_parameter("offset_angular", "rotvec")
-        self.declare_parameter("offset_rate_hz", 10.0)
 
         self.base_frame = self.get_parameter("base_frame").value
         self.kinematics_base_frame = self.get_parameter("kinematics_base_frame").value
@@ -219,26 +213,6 @@ class ArmIKNode(Node):
         self.delta_accum = bool(self.get_parameter("delta_accumulate").value)
         self.delta_max_lin = float(self.get_parameter("delta_max_lin").value)
         self.delta_max_rot = float(self.get_parameter("delta_max_rot").value)
-
-                self.publish_offset = bool(self.get_parameter("publish_offset").value)
-        self.offset_topic = str(self.get_parameter("offset_topic").value)
-        self.offset_frame = str(self.get_parameter("offset_frame").value).lower()
-        self.offset_angular = str(self.get_parameter("offset_angular").value).lower()
-        self.offset_rate_hz = float(self.get_parameter("offset_rate_hz").value)
-
-        if self.offset_frame not in ("base", "ee"):
-            self.get_logger().warn(
-                f"Неизвестный offset_frame='{self.offset_frame}'. "
-                "Использую 'base'. Допустимые значения: 'base', 'ee'."
-            )
-            self.offset_frame = "base"
-
-        if self.offset_angular not in ("rotvec", "rpy"):
-            self.get_logger().warn(
-                f"Неизвестный offset_angular='{self.offset_angular}'. "
-                "Использую 'rotvec'. Допустимые значения: 'rotvec', 'rpy'."
-            )
-            self.offset_angular = "rotvec"
 
         # ---------------- состояние ----------------
         self.joints = {}
@@ -552,7 +526,7 @@ class ArmIKNode(Node):
     def to_base_T(self, goal: PoseStamped):
         """PoseStamped в любой TF-рамке -> матрица 4x4 в base_frame."""
         fid = goal.header.frame_id
-        if fid in ("", self.base_frame, "base_link"):
+        if fid in ("", self.base_frame):
             return pose_to_T(goal.pose)
         tfm = self.tf_buffer.lookup_transform(self.base_frame, fid,
                                               rclpy.time.Time(),
@@ -703,7 +677,7 @@ class ArmIKNode(Node):
         fid = msg.header.frame_id
         dpos = np.array([msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z])
         drot = np.array([msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z])
-        if fid not in ("", self.base_frame, "base_link"):
+        if fid not in ("", self.base_frame):
             try:
                 tfm = self.tf_buffer.lookup_transform(
                     self.base_frame, fid, rclpy.time.Time(),

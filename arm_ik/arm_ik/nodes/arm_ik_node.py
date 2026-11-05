@@ -88,9 +88,17 @@ except ImportError:
 def pose_to_T(msg_pose):
     p = msg_pose.position
     q = msg_pose.orientation
+    quat = np.asarray([q.x, q.y, q.z, q.w], dtype=float)
+    pos = np.asarray([p.x, p.y, p.z], dtype=float)
+    if not np.all(np.isfinite(quat)) or not np.all(np.isfinite(pos)):
+        raise ValueError("pose contains NaN or infinity")
+    norm = float(np.linalg.norm(quat))
+    if norm < 1e-12:
+        raise ValueError("pose quaternion has zero norm")
+    quat = quat / norm
     T = np.eye(4)
-    T[:3, :3] = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
-    T[:3, 3] = [p.x, p.y, p.z]
+    T[:3, :3] = Rotation.from_quat(quat).as_matrix()
+    T[:3, 3] = pos
     return T
 
 
@@ -551,8 +559,10 @@ class ArmIKNode(Node):
         fid = goal.header.frame_id
         if fid in ("", self.base_frame):
             return pose_to_T(goal.pose)
-        tfm = self.tf_buffer.lookup_transform(self.base_frame, fid,
-                                              rclpy.time.Time(),
+        stamp = (rclpy.time.Time.from_msg(goal.header.stamp)
+                 if goal.header.stamp.sec or goal.header.stamp.nanosec
+                 else rclpy.time.Time())
+        tfm = self.tf_buffer.lookup_transform(self.base_frame, fid, stamp,
                                               timeout=rclpy.duration.Duration(seconds=0.5))
         t = tfm.transform.translation
         r = tfm.transform.rotation
@@ -780,18 +790,21 @@ class ArmIKNode(Node):
             return  # нулевая дельта — ничего делать не нужно
 
         # angular задаёт конечный поворот за команду (rotation vector), а не скорость.
-        T_des = delta_to_T(T_ref, dpos, drot, base_ref=True)
-        self.get_logger().info(
-            f"[{side}] delta-цель: dp=({dpos[0]:+.3f},{dpos[1]:+.3f},{dpos[2]:+.3f}) м, "
-            f"dr=({drot[0]:+.3f},{drot[1]:+.3f},{drot[2]:+.3f}) рад "
-            f"[ref={'last_goal' if use_last else 'measured'}, rot_frame={self.delta_rotation_frame}]")
         if self.delta_rotation_frame == "tcp":
-            # В режиме tcp rotation-vector задаётся по локальным осям кисти.
+            if fid not in ("", self.base_frame):
+                self.get_logger().warning(
+                    "delta_rotation_frame=tcp требует header.frame_id пустой или base_frame")
+                return
             drot = T_ref[:3, :3] @ drot
         elif self.delta_rotation_frame != "base":
             self.get_logger().error(
                 "delta_rotation_frame должен быть 'base' или 'tcp'; delta отклонена")
             return
+        T_des = delta_to_T(T_ref, dpos, drot, base_ref=True)
+        self.get_logger().info(
+            f"[{side}] delta-цель: dp=({dpos[0]:+.3f},{dpos[1]:+.3f},{dpos[2]:+.3f}) м, "
+            f"dr=({drot[0]:+.3f},{drot[1]:+.3f},{drot[2]:+.3f}) рад "
+            f"[ref={'last_goal' if use_last else 'measured'}, rot_frame={self.delta_rotation_frame}]")
         self.set_goal(side, T_des, position_only=(nl > 1e-9 and nr < 1e-9))
 
     # ------------------------------------------------------------ service

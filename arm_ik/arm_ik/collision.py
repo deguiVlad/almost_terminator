@@ -22,10 +22,15 @@ from .kinematics import chain_transforms
 
 class TableGuard:
     def __init__(self, h_table=0.9, x0=0.35, x1=1.2, y_half=1.0, margin=0.02):
-        self.h = h_table      # высота поверхности стола в рамке pelvis
-        self.x0, self.x1 = x0, x1
-        self.y_half = y_half
-        self.margin = margin  # запас, м
+        values = (h_table, x0, x1, y_half, margin)
+        if not all(np.isfinite(float(v)) for v in values):
+            raise ValueError("table geometry parameters must be finite")
+        if x0 >= x1 or y_half <= 0.0 or margin < 0.0:
+            raise ValueError("invalid table bounds or margin")
+        self.h = float(h_table)
+        self.x0, self.x1 = float(x0), float(x1)
+        self.y_half = float(y_half)
+        self.margin = float(margin)
 
     def inside_xy(self, p):
         return (self.x0 <= p[0] <= self.x1) and (abs(p[1]) <= self.y_half)
@@ -115,6 +120,8 @@ class TableGuard:
     def clamp_target_above_table(self, pos):
         """Жёсткая страховка цели: TCP никогда не запрашивается ниже стола+запас."""
         p = np.asarray(pos, dtype=float).copy()
+        if p.shape != (3,) or not np.all(np.isfinite(p)):
+            raise ValueError("target position must contain three finite values")
         if self.inside_xy(p):
             p[2] = max(p[2], self.h + self.margin)
         return p

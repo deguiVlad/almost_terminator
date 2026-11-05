@@ -588,8 +588,6 @@ class ArmIKNode(Node):
             self.get_logger().error("[%s] цель отклонена: нет TF/joint state: %s" %
                                     (side, e))
             return False
-        ex.T_des = T_des_model
-
         barrier = None
         if self.guard is not None:
             barrier = lambda q: self.guard.table_cost_gradient(model, q, k=30.0)
@@ -605,6 +603,7 @@ class ArmIKNode(Node):
 
         # Для абсолютных целей разрешаем безопасный fallback: достичь позиции,
         # если ориентация TCP недостижима. Delta-команды явно отключают его.
+        orientation_relaxed = False
         if not ok and allow_position_fallback and not position_only:
             q_sol, ok, epos, erot = ik_multi_seed(
                 model, T_des_model, seeds, max_iter=350,
@@ -612,9 +611,16 @@ class ArmIKNode(Node):
                 barrier=barrier, task_weights=(1.0, self.ik_rotation_weight),
                 task_mask=[True, True, True, False, False, False])
             if ok:
+                orientation_relaxed = True
                 self.get_logger().warn(
                     f"[{side}] requested orientation relaxed; position target reached")
+                # Fine control must converge to the achievable orientation,
+                # not keep chasing the rejected orientation forever.
+                T_achieved, _ = fk(model, q_sol)
+                T_des_model = T_des_model.copy()
+                T_des_model[:3, :3] = T_achieved[:3, :3]
 
+        ex.T_des = T_des_model
         dt = 1.0 / self.rate_hz
         if ok and self.guard is not None:
             traj = joint_space_profile(q_now, q_sol, self.spd, self.a_max, dt)

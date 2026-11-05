@@ -110,7 +110,12 @@ except Exception:  # окружение без numpy/scipy — чистый Pyth
         return _pn._Array([x / n, y / n, z / n, w / n])
 
     def _quat_xyzw_to_matrix(q):
-        x, y, z, w = q
+        if len(q) != 4 or not all(math.isfinite(float(v)) for v in q):
+            raise ValueError("quaternion must contain four finite values")
+        norm = math.sqrt(sum(float(v) * float(v) for v in q))
+        if norm < 1e-12:
+            raise ValueError("zero-length quaternion is invalid")
+        x, y, z, w = [float(v) / norm for v in q]
         return [[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
                 [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
                 [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]]
@@ -144,6 +149,23 @@ except Exception:  # окружение без numpy/scipy — чистый Pyth
 
         def as_matrix(self):
             return _pn._Array([_pn._Array(row) for row in self._m])
+
+        def as_euler(self, seq, degrees=False):
+            if seq != "xyz":
+                raise ValueError("fallback supports only the 'xyz' Euler sequence")
+            m = self._m
+            sy = max(-1.0, min(1.0, -m[2][0]))
+            pitch = math.asin(sy)
+            if abs(math.cos(pitch)) > 1e-9:
+                roll = math.atan2(m[2][1], m[2][2])
+                yaw = math.atan2(m[1][0], m[0][0])
+            else:
+                roll = math.atan2(-m[1][2], m[1][1])
+                yaw = 0.0
+            angles = [roll, pitch, yaw]
+            if degrees:
+                angles = [math.degrees(v) for v in angles]
+            return _pn._Array(angles)
 
         def as_rotvec(self):
             return _pn._Array(_matrix_to_rotvec(self._m))

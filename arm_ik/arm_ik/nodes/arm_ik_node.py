@@ -134,7 +134,7 @@ class ArmIKNode(Node):
         # ParameterAlreadyDeclaredException — не добавлять.
         self.declare_parameter("base_frame", "waist_yaw_link")
         self.declare_parameter("kinematics_base_frame", "waist_yaw_link")
-        self.declare_parameter("urdf_path", "/home/user/nssr-polygon/assets/robots/tiangong_pro/tiangong_pro_with_hands.urdf")
+        self.declare_parameter("urdf_path", "")
         self.declare_parameter("rate_hz", 50.0)
         self.declare_parameter("spd_limit", 0.8)       # жёсткий лимит документации
         self.declare_parameter("a_max", 0.4)
@@ -384,10 +384,10 @@ class ArmIKNode(Node):
                 with open(self.urdf_path, "r", encoding="utf-8") as stream:
                     urdf_xml = stream.read()
             except OSError as e:
-                self.get_logger().error(
-                    "URDF-файл недоступен (%s); IK-модель из TF не подменяю: %s" %
+                self.get_logger().warning(
+                    "URDF-файл недоступен (%s); пробую transient-local /robot_description: %s" %
                     (self.urdf_path, e))
-                return False
+                urdf_xml = self._urdf_xml
         if urdf_xml:
             try:
                 from arm_ik.urdf_model import build_models_from_urdf
@@ -409,6 +409,18 @@ class ArmIKNode(Node):
             except Exception as e:
                 self.get_logger().error("ошибка построения IK из URDF: %s" % e)
                 return False
+
+        # TF содержит только текущие трансформы, но не раскрывает URDF joint axis,
+        # joint type и position limits. Строить исполнительную IK-модель только
+        # по TF небезопасно: при отсутствии URDF остаёмся в ожидании.
+        if not urdf_xml:
+            if not getattr(self, "_urdf_missing_warned", False):
+                self.get_logger().warning(
+                    "URDF ещё не получен: задайте urdf_path или запустите "
+                    "robot_state_publisher с публикацией /robot_description. "
+                    "TF-only IK отключён, так как из TF нельзя восстановить оси и limits.")
+                self._urdf_missing_warned = True
+            return False
 
         now = self.get_clock().now()
         if not force:
@@ -605,7 +617,7 @@ class ArmIKNode(Node):
         T[:3, 3] = [t.x, t.y, t.z]
         return T
 
-    def set_goal(self, side, T_des, position_only=False, allow_position_fallback=True):
+    def set_goal(self, side, T_des, position_only=False):
         """Общий конвейер: IK -> траектория (с защитой стола) -> исполнение."""
         if not self._tf_models_ready:
             self.get_logger().warn(f"[{side}] IK rejected: URDF model is not ready")
@@ -614,6 +626,10 @@ class ArmIKNode(Node):
         model = self.models[side]
         if not all(name in self.joints for name in model.names):
             self.get_logger().warn(f"[{side}] IK rejected: /joint_states has not supplied all 7 arm joints")
+            return False
+        T_des = np.asarray(T_des, dtype=float).copy()
+        if T_des.shape != (4, 4) or not np.all(np.isfinite(T_des)):
+            self.get_logger().error(f"[{side}] goal rejected: pose matrix is invalid")
             return False
         if self.guard is not None:
             T_des[:3, 3] = self.guard.clamp_target_above_table(T_des[:3, 3])
@@ -657,24 +673,31 @@ class ArmIKNode(Node):
             return True
 
         # 2) план Б: заход через waypoint строго над столом (две IK-фазы)
-        if self.guard is not None:
+        if self.guard is not None and self.lift > 0.0:
+            # Настоящий waypoint: сначала поднять TCP, затем идти к финальной
+            # цели. Оба суставных сегмента проверяются сэмплированием звеньев.
             wp = T_des_model.copy()
-            # waypoint поднимаем в системе IK; стол уже проверен в planning frame
-            q_wp, ok1, _, _ = ik_multi_seed(model, wp, seeds, max_iter=250,
-                                            barrier=barrier,
-                                            task_weights=(1.0, self.ik_rotation_weight))
-            q_fin, ok2, _, _ = ik_multi_seed(model, T_des_model, [q_wp] + seeds, max_iter=250,
-                                             barrier=barrier,
-                                             task_weights=(1.0, self.ik_rotation_weight))
-            if ok1 and ok2:
-                t1 = joint_space_profile(q_now, q_wp, self.spd, self.a_max, dt)
-                t2 = joint_space_profile(q_wp, q_fin, self.spd, self.a_max, dt)
-                ex.traj = np.vstack([t1[:-1], t2])
-                ex.idx, ex.state, ex.fine_cycles = 0, ArmExecutor.TRAJ, 0
-                ex.last_T_des = T_des.copy()
-                self.get_logger().info(
-                    f"[{side}] IK через waypoint над столом ({len(ex.traj)} точек)")
-                return True
+            wp[2, 3] += self.lift
+            q_wp, ok1, _, _ = ik_multi_seed(
+                model, wp, seeds, max_iter=300, barrier=barrier,
+                task_weights=(1.0, self.ik_rotation_weight), task_mask=task_mask)
+            if ok1:
+                q_fin, ok2, _, _ = ik_multi_seed(
+                    model, T_des_model, [q_wp] + seeds, max_iter=350,
+                    barrier=barrier,
+                    task_weights=(1.0, self.ik_rotation_weight), task_mask=task_mask)
+                if ok2:
+                    t1 = joint_space_profile(q_now, q_wp, self.spd, self.a_max, dt)
+                    t2 = joint_space_profile(q_wp, q_fin, self.spd, self.a_max, dt)
+                    route = np.vstack([t1[:-1], t2])
+                    if not any(self.guard.collides_with_table(model, qq) for qq in route):
+                        ex.traj = route
+                        ex.idx, ex.state, ex.fine_cycles = 0, ArmExecutor.TRAJ, 0
+                        ex.last_T_des = np.linalg.inv(T_model_base) @ T_des_model
+                        self.get_logger().info(
+                            f"[{side}] IK через проверенный waypoint над столом "
+                            f"({len(ex.traj)} точек)")
+                        return True
 
         ex.state, ex.traj = ArmExecutor.FAILED, None
         ex.last_err = (epos, erot)
@@ -762,8 +785,14 @@ class ArmIKNode(Node):
             f"[{side}] delta-цель: dp=({dpos[0]:+.3f},{dpos[1]:+.3f},{dpos[2]:+.3f}) м, "
             f"dr=({drot[0]:+.3f},{drot[1]:+.3f},{drot[2]:+.3f}) рад "
             f"[ref={'last_goal' if use_last else 'measured'}, rot_frame={self.delta_rotation_frame}]")
-        self.set_goal(side, T_des, position_only=(nl > 1e-9 and nr < 1e-9),
-                      allow_position_fallback=False)
+        if self.delta_rotation_frame == "tcp":
+            # В режиме tcp rotation-vector задаётся по локальным осям кисти.
+            drot = T_ref[:3, :3] @ drot
+        elif self.delta_rotation_frame != "base":
+            self.get_logger().error(
+                "delta_rotation_frame должен быть 'base' или 'tcp'; delta отклонена")
+            return
+        self.set_goal(side, T_des, position_only=(nl > 1e-9 and nr < 1e-9))
 
     # ------------------------------------------------------------ service
     def solve_srv(self, req, res):

@@ -859,11 +859,20 @@ class ArmIKNode(Node):
                     dq = J.T @ np.linalg.solve(A, e)
                     dq = np.clip(dq, -0.1, 0.1)          # ≤ 0.1 рад/цикл (FOCUS_TRACKING §3)
                     q_new = clip_to_limits(q_meas + self.kp * dq, model, margin=1e-4)
-                    ex.traj = joint_space_profile(q_meas, q_new,
-                                                  min(self.spd, 0.3), self.a_max,
-                                                  1.0 / self.rate_hz)
-                    ex.idx = 0
-                    ex.fine_cycles += 1
+                    fine_traj = joint_space_profile(
+                        q_meas, q_new, min(self.spd, 0.3), self.a_max,
+                        1.0 / self.rate_hz)
+                    if self.guard is not None and any(
+                            self.guard.collides_with_table(model, qq)
+                            for qq in fine_traj):
+                        ex.state = ArmExecutor.FAILED
+                        ex.traj = None
+                        self.get_logger().error(
+                            f"[{side}] fine correction intersects table; stopping")
+                    else:
+                        ex.traj = fine_traj
+                        ex.idx = 0
+                        ex.fine_cycles += 1
 
             st = {"side": side, "state": ex.state,
                   "err_pos_m": round(ex.last_err[0], 4) if ex.last_err[0] == ex.last_err[0] else None,

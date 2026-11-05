@@ -293,10 +293,10 @@ ros2 run arm_ik demo_delta --ros-args -p use_sim_time:=true \
 | `h_table`, `table_x0/x1/y_half/margin` | 0.9, 0.35/1.2/1.0/0.02 | геометрия стола |
 | `enable_table_guard` | true | выключить защиту (например, для задач вне стола) |
 | `waypoint_lift` | 0.25 | запас захода сверху, м |
-| `n_seeds` | 4 | число стартов IK |
+| `n_seeds` | 12 | число стартов IK (измеренная поза + альтернативные плечевые/локтевые конфигурации) |
 | `delta_reference` | measured | опора delta-целей (§5.2) |
 | `delta_accumulate` | false | суммирование серии дельт |
-| `delta_max_lin/rot` | 0.15/0.6 | предохранители размера дельты |
+| `delta_max_lin/rot` | 0.35/1.2 | предохранители одной delta-команды, м/рад; увеличены для более широкого ручного диапазона |
 | `tcp_offset` | "" | переопределить "x,y,z" кончика поверх arms.json |
 | `model_path` | "" | arms.json (пусто — из share/config) |
 

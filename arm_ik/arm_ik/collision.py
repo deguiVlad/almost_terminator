@@ -117,11 +117,13 @@ class TableGuard:
         T[:3, 3] = p
         return T
 
-    def clamp_target_above_table(self, pos):
-        """Жёсткая страховка цели: TCP никогда не запрашивается ниже стола+запас."""
+    def clamp_target_above_table(self, pos, link_radius=0.05):
+        """Поднять TCP так, чтобы условный радиус инструмента был выше стола."""
         p = np.asarray(pos, dtype=float).copy()
         if p.shape != (3,) or not np.all(np.isfinite(p)):
             raise ValueError("target position must contain three finite values")
+        if not np.isfinite(float(link_radius)) or link_radius < 0.0:
+            raise ValueError("link_radius must be finite and non-negative")
         if self.inside_xy(p):
-            p[2] = max(p[2], self.h + self.margin)
+            p[2] = max(p[2], self.h + self.margin + float(link_radius))
         return p

@@ -42,19 +42,29 @@ class TableGuard:
             return max(0.0, d)
         return 0.0
 
-    def collides_with_table(self, model, q, link_radius=0.05, sample_step=0.025):
-        """Проверяет звенья как отрезки с радиусом, а не только суставные точки.
+    def _points(self, model, q, T_guard_model=None):
+        """Joint/TCP points in the table-guard frame."""
+        Ts = chain_transforms(model, q)
+        points = [np.zeros(3)] + [T[:3, 3] for T in Ts]
+        points.append((Ts[-1] @ np.append(model.tcp_offset, 1.0))[:3])
+        if T_guard_model is None:
+            return points
+        transform = np.asarray(T_guard_model, dtype=float)
+        if transform.shape != (4, 4) or not np.all(np.isfinite(transform)):
+            raise ValueError("T_guard_model must be a finite 4x4 transform")
+        return [(transform @ np.append(point, 1.0))[:3] for point in points]
 
-        Это консервативная геометрическая аппроксимация для плоского стола.
-        Она не заменяет проверку полной collision geometry через MoveIt/FCL.
+    def collides_with_table(self, model, q, link_radius=0.05, sample_step=0.025,
+                            T_guard_model=None):
+        """Sample link segments in the table frame with a conservative radius.
+
+        This is a planar-table approximation, not full MoveIt/FCL collision
+        geometry. T_guard_model maps the URDF model base into the table frame.
         """
         if (not np.isfinite(float(link_radius)) or not np.isfinite(float(sample_step))
                 or link_radius < 0.0 or sample_step <= 0.0):
             raise ValueError("link_radius must be finite and >= 0; sample_step finite and > 0")
-        Ts = chain_transforms(model, q)
-        pts = [np.zeros(3)] + [T[:3, 3] for T in Ts]
-        tcp = (Ts[-1] @ np.append(model.tcp_offset, 1.0))[:3]
-        pts.append(tcp)
+        pts = self._points(model, q, T_guard_model)
 
         def collides(p):
             x, y, z = (float(v) for v in p)

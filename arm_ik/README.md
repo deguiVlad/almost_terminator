@@ -49,7 +49,8 @@ ros2 launch arm_ik arm_ik.launch.py \
 ```
 
 Для реального робота wall time используется по умолчанию. В симуляции явно
-включите ROS simulation time: `use_sim_time:=true`.
+включите ROS simulation time: `use_sim_time:=true`. По умолчанию planning/table
+frame — `pelvis`, а URDF arm-chain root — `waist_yaw_link`; TF2 преобразует между ними.
 
 Либо оставьте `urdf_path` пустым: узел ожидает transient-local топик
 `/robot_description` типа `std_msgs/msg/String`:
@@ -147,8 +148,9 @@ ros2 topic pub --once /arm_ik/goal_right geometry_msgs/msg/PoseStamped \
 |---|---:|---|
 | `urdf_path` | пусто | Путь к URDF; иначе используется `/robot_description` |
 | `use_sim_time` | false | Включать ROS time из `/clock` для симуляции |
-| `base_frame` | `waist_yaw_link` | Система координат целей |
-| `kinematics_base_frame` | `waist_yaw_link` | Корень URDF-цепей |
+| `base_frame` | `pelvis` | Система координат целей и стола |
+| `kinematics_base_frame` | `waist_yaw_link` | Корень URDF-цепей рук |
+
 | `rate_hz` | 50 | Частота control loop |
 | `joint_state_timeout` | 0.5 с | Допустимый возраст обратной связи |
 | `spd_limit` | 0.8 рад/с | Верхняя граница скорости |

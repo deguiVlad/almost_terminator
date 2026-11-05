@@ -360,12 +360,13 @@ class ArmIKNode(Node):
                 "рекомендуется ros2 launch ... use_sim_time:=true")
 
     def on_robot_desc(self, msg):
-        """Полный URDF из robot_description — источник кинематики и лимитов."""
-        try:
-            self._urdf_xml = str(msg.data)
-            self.try_build_urdf_models()
-        except Exception:
-            pass
+        """Full URDF from robot_description; authoritative kinematics source."""
+        xml = str(msg.data).strip()
+        if not xml:
+            self.get_logger().warn("Ignoring empty /robot_description message")
+            return
+        self._urdf_xml = xml
+        self.try_build_urdf_models()
 
     def try_build_urdf_models(self):
         """Build both arm models from an explicit URDF file or /robot_description."""

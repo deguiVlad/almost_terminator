@@ -799,12 +799,32 @@ class ArmIKNode(Node):
             self.pose_pubs[side].publish(ps)
 
             if ex.traj is not None and ex.idx < len(ex.traj):
-                # Сохраняем последнюю реально отправленную точку траектории.
+                # Re-check against the current torso yaw transform immediately
+                # before publishing: the torso may have moved since planning.
                 q_command = np.asarray(ex.traj[ex.idx], dtype=float).copy()
-                if self.cmd_pub is not None:
-                    self.cmd_pub.publish(self.make_cmd(model, q_command))
-                ex.hold_q = q_command
-                ex.idx += 1
+                if self.guard is not None:
+                    try:
+                        T_guard_model = self._lookup_T(
+                            self.base_frame, self.kinematics_base_frame)
+                        blocked = self.guard.collides_with_table(
+                            model, q_command, T_guard_model=T_guard_model)
+                    except Exception as exc:
+                        blocked = True
+                        self.get_logger().error(
+                            f"[{side}] table-frame TF unavailable; stopping arm command: {exc}")
+                    if blocked:
+                        ex.state = ArmExecutor.FAILED
+                        ex.traj = None
+                        ex.idx = 0
+                        self.get_logger().error(
+                            f"[{side}] trajectory point blocked by table guard; "
+                            "holding the last safe command")
+                        q_command = None
+                if q_command is not None:
+                    if self.cmd_pub is not None:
+                        self.cmd_pub.publish(self.make_cmd(model, q_command))
+                    ex.hold_q = q_command
+                    ex.idx += 1
             elif ex.state == ArmExecutor.TRAJ:
                 # Основной профиль закончился. Следующий профиль будет
                 # построен fine-контуром ниже.

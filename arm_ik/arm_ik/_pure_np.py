@@ -285,7 +285,10 @@ class _NP:
 
     @staticmethod
     def allclose(a, b, atol=1e-8, rtol=1e-5):
-        for x, y in zip(a, b):
+        av, bv = list(_flatten(a)), list(_flatten(b))
+        if len(av) != len(bv):
+            return False
+        for x, y in zip(av, bv):
             if abs(float(x) - float(y)) > atol + rtol * abs(float(y)):
                 return False
         return True
@@ -373,6 +376,8 @@ class _NP:
 
     @staticmethod
     def isfinite(x):
+        if _is2d(x):
+            return _Array([_Array([math.isfinite(float(v)) for v in row]) for row in x])
         if isinstance(x, (list, tuple, _Array)):
             return _Array([math.isfinite(float(v)) for v in x])
         return math.isfinite(float(x))
@@ -440,11 +445,11 @@ class _NP:
 
     @staticmethod
     def any(seq):
-        return any(bool(x) for x in seq)
+        return any(bool(x) for x in _flatten(seq))
 
     @staticmethod
     def all(seq):
-        return all(bool(x) for x in seq)
+        return all(bool(x) for x in _flatten(seq))
 
     @staticmethod
     def stack(seq, axis=0):

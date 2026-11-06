@@ -141,8 +141,8 @@ class Arm:
     def fk(self, q, extra=None):
         return self._frames(q, extra)[0]
 
-    def jacobian(self, q, extra=None):
-        T, axes = self._frames(q, extra)
+    @staticmethod
+    def _jac(T, axes):
         p = T[:3, 3]
         J = np.zeros((6, 7))
         for i, (z, o) in enumerate(axes):
@@ -150,30 +150,82 @@ class Arm:
             J[3:, i] = z
         return J
 
-    def ik(self, T_des, q0, extra=None, rot_weight=1.0, iters=200, tol_pos=1e-3, tol_rot=1e-2,
-           damping=0.05, max_step=0.2):
-        """DLS от q0 с обрезкой по пределам. -> (q, ошибка позиции м, ошибка ориентации рад)."""
-        q = np.clip(np.array(q0, dtype=float), self.lower, self.upper)
-        W = np.diag([1.0, 1.0, 1.0] + [rot_weight] * 3)
+    def jacobian(self, q, extra=None):
+        return self._jac(*self._frames(q, extra))
+
+    def wrist_lock(self):
+        """Кисть соосна предплечью: wrist_pitch и wrist_roll держатся в нуле (прямая кисть в URDF)."""
+        return {i: float(np.clip(0.0, self.lower[i], self.upper[i]))
+                for i, n in enumerate(self.names) if n.startswith(("wrist_pitch", "wrist_roll"))}
+
+    @staticmethod
+    def _step(J, ep_v, er_v, orient, rot_weight, damping):
+        I3 = damping ** 2 * np.eye(3)
+        if orient == "full":
+            w = np.array([1.0, 1.0, 1.0] + [rot_weight] * 3)
+            Jw = J * w[:, None]
+            return Jw.T @ np.linalg.solve(Jw @ Jw.T + damping ** 2 * np.eye(6), np.concatenate([ep_v, er_v]) * w)
+        Jp = J[:3]
+        Jp_pinv = Jp.T @ np.linalg.inv(Jp @ Jp.T + I3)
+        dq = Jp_pinv @ ep_v
+        if orient == "secondary":
+            # ориентация — только движениями, которые не сдвигают позицию (нуль-пространство Jp)
+            N = np.eye(J.shape[1]) - np.linalg.pinv(Jp, rcond=1e-4) @ Jp
+            JrN = J[3:] @ N
+            d2 = N @ (JrN.T @ np.linalg.solve(JrN @ JrN.T + I3, er_v - J[3:] @ dq))
+            n = np.max(np.abs(d2))
+            dq = dq + (d2 * (0.1 / n) if n > 0.1 else d2)   # вторичная задача не забивает шаг позиции
+        return dq
+
+    def ik(self, T_des, q0, extra=None, orient="full", rot_weight=1.0, locked=None, margin=0.05, iters=200,
+           tol_pos=1e-3, tol_rot=1e-2, damping=0.05, max_step=0.2):
+        """DLS от q0 в пределах суставов. -> (q, ошибка позиции м, ошибка ориентации рад).
+
+        orient: "full" — вся поза (ориентация с весом rot_weight); "secondary" — сначала позиция,
+        ориентация насколько позволяют оставшиеся степени свободы; "none" — только позиция.
+        locked: {индекс сустава: угол} — суставы, которые не двигаются.
+        margin: запас от пределов, рад — чтобы приводу оставался ход на дотягивание.
+        """
+        m = np.minimum(margin, (self.upper - self.lower) / 4)
+        lo, hi = self.lower + m, self.upper - m
+        q = np.clip(np.array(q0, dtype=float), lo, hi)
+        free = np.ones(7, dtype=bool)
+        for i, v in (locked or {}).items():
+            q[i], free[i] = v, False
+        prev_er = math.inf
         for _ in range(iters):
-            T = self.fk(q, extra)
-            e = np.concatenate([T_des[:3, 3] - T[:3, 3], rot_error(T[:3, :3], T_des[:3, :3])])
-            ep, er = np.linalg.norm(e[:3]), np.linalg.norm(e[3:])
-            if ep < tol_pos and (rot_weight == 0 or er < tol_rot):
+            T, axes = self._frames(q, extra)
+            ep_v = T_des[:3, 3] - T[:3, 3]
+            er_v = rot_error(T[:3, :3], T_des[:3, :3])
+            ep, er = np.linalg.norm(ep_v), np.linalg.norm(er_v)
+            if ep < tol_pos and (orient == "none" or er < tol_rot):
                 break
-            J = W @ self.jacobian(q, extra)
-            dq = J.T @ np.linalg.solve(J @ J.T + damping ** 2 * np.eye(6), W @ e)
+            if orient == "secondary" and ep < tol_pos and prev_er - er < 1e-6:
+                break               # позиция есть, ориентация больше не улучшается
+            prev_er = er
+            J = self._jac(T, axes)
+            active = free.copy()
+            for _ in range(3):      # суставы, упёршиеся в предел, исключаются и шаг пересчитывается
+                dq = self._step(J * active, ep_v, er_v, orient, rot_weight, damping) * active
+                blocked = active & (((q <= lo + 1e-9) & (dq < 0)) | ((q >= hi - 1e-9) & (dq > 0)))
+                if not blocked.any():
+                    break
+                active &= ~blocked
             n = np.max(np.abs(dq))
             if n > max_step:
                 dq *= max_step / n
-            q = np.clip(q + dq, self.lower, self.upper)
+            q = np.clip(q + dq, lo, hi)
+            for i, v in (locked or {}).items():
+                q[i] = v
         T = self.fk(q, extra)
         return q, float(np.linalg.norm(T_des[:3, 3] - T[:3, 3])), float(np.linalg.norm(rot_error(T[:3, :3], T_des[:3, :3])))
 
-    def solve(self, T_des, q_now, extra=None, n_random=6, tol_pos=0.005, tol_rot=0.03, rot_weight=1.0, seed=0):
+    def solve(self, T_des, q_now, extra=None, orient="full", rot_weight=1.0, locked=None, margin=0.05,
+              n_random=8, tol_pos=0.005, tol_rot=0.03, seed=0):
         """IK из текущей позы, средней позы и случайных стартов.
 
-        Из решений в допуске берётся ближайшее к q_now (меньше движения), иначе — с минимальной ошибкой.
+        Из решений в допуске берётся ближайшее к q_now (меньше движения), для "secondary" — с наименьшей
+        ошибкой ориентации; если в допуск не попало ни одно — с наименьшей ошибкой.
         -> (ok, q, ошибка позиции, ошибка ориентации).
         """
         rng = np.random.default_rng(seed)
@@ -181,13 +233,15 @@ class Arm:
         seeds = [np.array(q_now, dtype=float), mid] + [rng.uniform(self.lower, self.upper) for _ in range(n_random)]
         best, best_ok = None, None
         for s in seeds:
-            q, ep, er = self.ik(T_des, s, extra, rot_weight=rot_weight, tol_pos=tol_pos / 5, tol_rot=tol_rot / 5)
-            ok = ep < tol_pos and (rot_weight == 0 or er < tol_rot)
+            q, ep, er = self.ik(T_des, s, extra, orient, rot_weight, locked, margin,
+                                tol_pos=tol_pos / 5, tol_rot=tol_rot / 5)
+            ok = ep < tol_pos and (orient != "full" or er < tol_rot)
             if ok:
                 dist = np.linalg.norm(q - q_now)
-                if best_ok is None or dist < best_ok[0]:
-                    best_ok = (dist, q, ep, er)
-                if s is seeds[0]:
+                score = er + 0.05 * dist if orient == "secondary" else dist
+                if best_ok is None or score < best_ok[0]:
+                    best_ok = (score, q, ep, er)
+                if s is seeds[0] and (orient != "secondary" or er < tol_rot):
                     break           # из текущей позы сошлось — ближе не найти
             elif best is None or ep + 0.1 * er < best[1] + 0.1 * best[2]:
                 best = (q, ep, er)

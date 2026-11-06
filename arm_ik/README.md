@@ -17,7 +17,7 @@
 ```bash
 colcon build --packages-select arm_ik
 source install/setup.bash
-ros2 launch arm_ik arm_ik.launch.py
+ros2 launch arm_ik arm_ik.launch.py urdf_path:=/nssr_sim/assets/robots/tiangong_pro/tiangong_pro_with_hands.urdf
 ```
 
 ## Интерфейс

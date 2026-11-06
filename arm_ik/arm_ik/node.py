@@ -1,16 +1,18 @@
 """IK-нода обеих рук: цель PoseStamped -> углы суставов -> /arm/cmd_pos с дотягиванием по /joint_states.
 
 Вход:  /robot_description (URDF, latched), /joint_states,
-       /arm_ik/goal_{left,right} (PoseStamped; рамка любая из TF, пусто = pelvis).
+       /arm_ik/goal_{left,right} (PoseStamped; рамка любая из TF, пусто = pelvis),
+       /arm_ik/delta_{left,right} (TwistStamped: смещение linear, м + поворот angular, рад).
 Выход: /arm/cmd_pos, /arm_ik/{left,right}/status (JSON), /arm_ik/wrist_{left,right}_pose.
 """
 import json
+import math
 
 import numpy as np
 import rclpy
 import tf2_ros
 from bodyctrl_msgs.msg import CmdSetMotorPosition, SetMotorPosition
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, TwistStamped
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -18,7 +20,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
-from arm_ik.kinematics import Arm, R_to_quat, make_T, quat_to_R, rot_error
+from arm_ik.kinematics import Arm, R_to_quat, axis_angle_R, make_T, quat_to_R, rot_error
 
 SIDES = ("left", "right")
 
@@ -28,6 +30,11 @@ def pose_to_T(p):
                   [p.position.x, p.position.y, p.position.z])
 
 
+def rotvec_to_R(w):
+    a = float(np.linalg.norm(w))
+    return axis_angle_R(w / a, a) if a > 1e-12 else np.eye(3)
+
+
 class ArmIK(Node):
     def __init__(self):
         super().__init__("arm_ik")
@@ -35,17 +42,23 @@ class ArmIK(Node):
         self.tips = {s: self.declare_parameter(f"tip_link_{s}", "").value or None for s in SIDES}
         self.tcp = list(self.declare_parameter("tcp_offset", [0.0, 0.0, 0.0]).value)
         self.spd = min(0.8, self.declare_parameter("spd", 0.8).value)
-        self.rot_weight = self.declare_parameter("rot_weight", 1.0).value   # 0 = только позиция
         self.tol_pos = self.declare_parameter("tol_pos", 0.01).value
         self.tol_rot = self.declare_parameter("tol_rot", 0.05).value
+        self.max_miss = self.declare_parameter("max_miss", 0.03).value      # м: дальше — цель отклоняется
         self.kp = self.declare_parameter("kp", 0.7).value                   # доля ошибки на коррекцию
         self.joint_tol = self.declare_parameter("joint_tol", 0.005).value
         self.max_corr = self.declare_parameter("max_corrections", 15).value
         self.rate = self.declare_parameter("rate_hz", 20.0).value
+        # читаются при каждой цели, меняются на лету: ros2 param set /arm_ik wrist_aligned true
+        self.declare_parameter("rot_weight", 1.0)           # 0 = только позиция
+        self.declare_parameter("wrist_aligned", False)      # кисть соосна предплечью
+        self.declare_parameter("delta_reference", "goal")   # goal | measured
 
         self.arms = {}
         self.joints = {}
         self.task = {s: {"state": "idle"} for s in SIDES}
+        self.last_cmd = {}      # поза, которую даёт последнее отправленное решение, — опора для delta
+        self.rejected = {}
         self.tf = tf2_ros.Buffer()
         tf2_ros.TransformListener(self.tf, self)
 
@@ -55,6 +68,7 @@ class ArmIK(Node):
         self.create_subscription(JointState, "/joint_states", self.on_joints, 10)
         for s in SIDES:
             self.create_subscription(PoseStamped, f"/arm_ik/goal_{s}", lambda m, s=s: self.on_goal(s, m), 10)
+            self.create_subscription(TwistStamped, f"/arm_ik/delta_{s}", lambda m, s=s: self.on_delta(s, m), 10)
         self.cmd = self.create_publisher(CmdSetMotorPosition, "/arm/cmd_pos", 10)
         self.status = {s: self.create_publisher(String, f"/arm_ik/{s}/status", 10) for s in SIDES}
         self.wrist = {s: self.create_publisher(PoseStamped, f"/arm_ik/wrist_{s}_pose", 10) for s in SIDES}
@@ -78,6 +92,18 @@ class ArmIK(Node):
     def now(self):
         return self.get_clock().now().nanoseconds * 1e-9
 
+    def base_from(self, frame):
+        """4x4 base <- frame из TF или None."""
+        if not frame or frame == self.base:
+            return np.eye(4)
+        try:
+            t = self.tf.lookup_transform(self.base, frame, Time(), timeout=Duration(seconds=0.5))
+        except tf2_ros.TransformException as e:
+            self.get_logger().warn(f"нет TF {self.base} <- {frame}: {e}")
+            return None
+        r, p = t.transform.rotation, t.transform.translation
+        return make_T(quat_to_R(r.x, r.y, r.z, r.w), [p.x, p.y, p.z])
+
     def send(self, arm, q, spd):
         msg = CmdSetMotorPosition()
         # spd: 0 в симуляторе значит «предельная», поэтому снизу ограничиваем
@@ -90,28 +116,69 @@ class ArmIK(Node):
         if arm is None:
             self.get_logger().warn("нет /robot_description — цель пропущена")
             return
-        T = pose_to_T(msg.pose)
-        frame = msg.header.frame_id
-        if frame and frame != self.base:
-            try:
-                t = self.tf.lookup_transform(self.base, frame, Time(), timeout=Duration(seconds=0.5))
-            except tf2_ros.TransformException as e:
-                self.get_logger().warn(f"нет TF {self.base} <- {frame}: {e}")
-                return
-            r, p = t.transform.rotation, t.transform.translation
-            T = make_T(quat_to_R(r.x, r.y, r.z, r.w), [p.x, p.y, p.z]) @ T
+        T_bf = self.base_from(msg.header.frame_id)
+        if T_bf is not None:
+            self.execute(side, T_bf @ pose_to_T(msg.pose))
 
-        q_now = self.q(arm)
-        ok, q_goal, ep, er = arm.solve(T, q_now, self.joints, tol_pos=self.tol_pos / 2,
-                                       tol_rot=self.tol_rot / 2, rot_weight=self.rot_weight)
-        if not ok:
-            self.task[side] = {"state": "unreachable", "err_pos": ep, "err_rot": er}
-            self.get_logger().warn(f"[{side}] цель недостижима: {ep * 100:.1f} см, {er:.2f} рад")
+    def on_delta(self, side, msg):
+        """6D-смещение кончика от текущей цели (или измеренной позы).
+
+        frame_id: пусто/pelvis — оси базы; "tool" или звено-кончик — оси кисти; иное — оси этой TF-рамки.
+        Поворот angular (ось * угол, рад) — вокруг кончика, позиция кончика при этом не меняется.
+        """
+        arm = self.arms.get(side)
+        if arm is None:
+            self.get_logger().warn("нет /robot_description — смещение пропущено")
             return
+        if self.get_parameter("delta_reference").value == "goal" and side in self.last_cmd:
+            T = self.last_cmd[side].copy()
+        else:
+            T = arm.fk(self.q(arm), self.joints)
+        lin, ang = msg.twist.linear, msg.twist.angular
+        d, w = np.array([lin.x, lin.y, lin.z]), np.array([ang.x, ang.y, ang.z])
+        frame = msg.header.frame_id
+        if frame in ("tool", arm.tip):
+            T[:3, 3] += T[:3, :3] @ d
+            T[:3, :3] = T[:3, :3] @ rotvec_to_R(w)
+        else:
+            T_bf = self.base_from(frame)
+            if T_bf is None:
+                return
+            d, w = T_bf[:3, :3] @ d, T_bf[:3, :3] @ w
+            T[:3, 3] += d
+            T[:3, :3] = rotvec_to_R(w) @ T[:3, :3]
+        self.execute(side, T)
+
+    def execute(self, side, T):
+        arm = self.arms[side]
+        rw = self.get_parameter("rot_weight").value
+        aligned = self.get_parameter("wrist_aligned").value
+        locked = arm.wrist_lock() if aligned else None
+        # кисть соосна предплечью: 5 суставов руки, позиция точно, ориентация — насколько получится
+        orient = "none" if rw == 0 else ("secondary" if aligned else "full")
+        q_now = self.q(arm)
+        kw = dict(rot_weight=rw, locked=locked, tol_pos=self.tol_pos / 2, tol_rot=self.tol_rot / 2)
+        ok, q_goal, ep, er = arm.solve(T, q_now, self.joints, orient, **kw)
+        if not ok and orient == "full":
+            # вся поза недостижима: позиция в приоритете, ориентация — ближайшая возможная
+            orient = "secondary"
+            ok, q_goal, ep, er = arm.solve(T, q_now, self.joints, orient, **kw)
+            if ok:
+                self.get_logger().warn(f"[{side}] ориентация недостижима точно, промах {er:.2f} рад "
+                                       f"({math.degrees(er):.0f}°); позиция — точно")
+        if not ok:
+            if ep > self.max_miss:
+                self.rejected[side] = {"err_pos": round(ep, 4), "err_rot": round(er, 4)}
+                self.get_logger().warn(f"[{side}] цель вне досягаемости: промах {ep * 100:.1f} см "
+                                       f"(> max_miss {self.max_miss * 100:.0f} см) — рука остаётся на месте")
+                return
+            self.get_logger().warn(f"[{side}] позиция недостижима точно, еду в ближайшую: промах {ep * 100:.1f} см")
+        self.rejected.pop(side, None)
         dq = np.abs(q_goal - q_now)
         dmax = max(float(dq.max()), 1e-6)
         self.send(arm, q_goal, self.spd * dq / dmax)    # все суставы приходят одновременно
-        self.task[side] = {"state": "moving", "T": T, "q_goal": q_goal, "q_cmd": q_goal.copy(),
+        self.last_cmd[side] = arm.fk(q_goal, self.joints)
+        self.task[side] = {"state": "moving", "orient": orient, "T": T, "q_goal": q_goal, "q_cmd": q_goal.copy(),
                            "settle_at": self.now() + dmax / self.spd, "q_prev": q_now, "still": 0, "corr": 0}
 
     def tick(self):
@@ -137,8 +204,8 @@ class ArmIK(Node):
                     if np.max(np.abs(e)) < self.joint_tol or t["corr"] >= self.max_corr:
                         ep = float(np.linalg.norm(t["T"][:3, 3] - T_meas[:3, 3]))
                         er = float(np.linalg.norm(rot_error(T_meas[:3, :3], t["T"][:3, :3])))
-                        hit = ep < self.tol_pos and (self.rot_weight == 0 or er < self.tol_rot)
-                        self.task[side] = t = {"state": "reached" if hit else "stopped",
+                        hit = ep < self.tol_pos and (t["orient"] != "full" or er < self.tol_rot)
+                        self.task[side] = t = {"state": "reached" if hit else "stopped", "orient": t["orient"],
                                                "err_pos": ep, "err_rot": er}
                     else:
                         # ПД-приводы недотягивают под весом руки: сдвигаем команду на долю ошибки
@@ -147,8 +214,10 @@ class ArmIK(Node):
                         t["corr"] += 1
                         t["still"] = 0
                         t["settle_at"] = self.now() + 0.2
-            st = {"state": t["state"]}
+            st = {k: t[k] for k in ("state", "orient") if k in t}
             st.update({k: round(t[k], 4) for k in ("err_pos", "err_rot") if k in t})
+            if side in self.rejected:
+                st["rejected"] = self.rejected[side]
             self.status[side].publish(String(data=json.dumps(st)))
 
 

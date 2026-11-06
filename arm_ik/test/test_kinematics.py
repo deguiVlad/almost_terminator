@@ -98,7 +98,7 @@ def test_ik_roundtrip_random_reachable(arm):
             fails += 1
             continue
         assert ep < 0.005 and er < 0.03
-        assert np.all(q >= arm.lower - 1e-12) and np.all(q <= arm.upper + 1e-12)
+        assert np.all(q >= arm.lower + 0.05 - 1e-12) and np.all(q <= arm.upper - 0.05 + 1e-12)
         T_sol = arm.fk(q, extra)
         assert np.linalg.norm(T_sol[:3, 3] - T[:3, 3]) < 0.005
     assert fails <= 2
@@ -116,8 +116,54 @@ def test_position_only(arm):
     q_true = np.array([-0.5, 0.3 if arm.side == "left" else -0.3, 0.1, -1.2, 0.2, 0.1, 0.0])
     T = arm.fk(q_true)
     T[:3, :3] = np.eye(3)    # ориентация, которую рука может и не принять, — игнорируется
-    ok, q, ep, _ = arm.solve(T, np.zeros(7), rot_weight=0.0)
+    ok, q, ep, _ = arm.solve(T, np.zeros(7), orient="none")
     assert ok and ep < 0.005
+
+
+def test_targets_at_joint_limits(arm):
+    # цели, для которых часть суставов стоит на границе допустимого (предел минус запас)
+    rng = np.random.default_rng(3)
+    fails = 0
+    for _ in range(40):
+        q_true = rng.uniform(arm.lower, arm.upper)
+        for i in rng.choice(7, 2, replace=False):
+            q_true[i] = arm.lower[i] + 0.05 if rng.random() < 0.5 else arm.upper[i] - 0.05
+        ok, *_ = arm.solve(arm.fk(q_true), np.clip(q_true + rng.normal(0, 0.6, 7), arm.lower, arm.upper))
+        fails += not ok
+    assert fails <= 2
+
+
+def test_secondary_orientation_keeps_position(arm):
+    rng = np.random.default_rng(4)
+    for _ in range(20):
+        q_true = rng.uniform(arm.lower, arm.upper)
+        T = arm.fk(q_true)
+        # ориентация, которую при этой позиции получить нельзя точно (кисть прямая)
+        T[:3, :3] = T[:3, :3] @ axis_angle_R([0, 1, 0], 0.8)
+        lock = arm.wrist_lock()
+        ok, q, ep, er = arm.solve(T, q_true, orient="secondary", locked=lock)
+        if not ok:
+            continue
+        assert ep < 0.005
+        assert all(q[i] == v for i, v in lock.items())
+        _, q_none, _, er_none = arm.solve(T, q_true, orient="none", locked=lock)
+        assert er <= er_none + 1e-6
+
+
+def test_secondary_reaches_full_pose_when_possible(arm):
+    rng = np.random.default_rng(6)
+    hits = 0
+    for _ in range(20):
+        q_true = rng.uniform(arm.lower, arm.upper)
+        ok, _, ep, er = arm.solve(arm.fk(q_true), np.clip(q_true + rng.normal(0, 0.4, 7), arm.lower, arm.upper),
+                                  orient="secondary")
+        hits += ok and er < 0.03
+    assert hits >= 17
+
+
+def test_wrist_lock(arm):
+    lock = arm.wrist_lock()
+    assert sorted(lock) == [5, 6] and all(v == 0.0 for v in lock.values())
 
 
 def test_rotation_helpers():

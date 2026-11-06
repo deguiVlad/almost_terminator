@@ -1,11 +1,12 @@
-"""ros2 launch arm_ik arm_ik.launch.py [rot_weight:=0.0] [tip_link_right:=...]"""
+"""ros2 launch arm_ik arm_ik.launch.py [rot_weight:=0.0] [wrist_aligned:=true] [tip_link_right:=...]"""
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
-ARGS = {"rot_weight": ("1.0", float), "tol_pos": ("0.01", float), "tol_rot": ("0.05", float),
+ARGS = {"rot_weight": ("1.0", float), "wrist_aligned": ("false", bool), "tol_pos": ("0.01", float),
+        "tol_rot": ("0.05", float), "max_miss": ("0.03", float), "delta_reference": ("goal", str),
         "tip_link_left": ("", str), "tip_link_right": ("", str)}
 
 

@@ -2,32 +2,23 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>arm_ik</name>
-  <version>0.4.0</version>
+  <version>1.0.0</version>
   <description>
-    Обратная кинематика обеих рук TienKung 2.0 Pro (7 DOF на руку):
-    DLS-IK с деревом звеньев из топиков симулятора /tf + /tf_static
-    (файлы URDF/JSON не читаются), траекторный профиль &lt;= 0.8 рад/с,
-    замыкание контура по /joint_states, защита от столкновения со столом,
-    время симуляции из /clock (use_sim_time).
-    Цели: абсолютная поза PoseStamped на /arm_ik/goal_{left,right} или
-    шестимерное смещение TwistStamped на /arm_ik/delta_{left,right};
-    команды — /arm/cmd_pos. Пакет сведён к одной ноде (arm_ik_node),
-    демо-паблишеры встроены в неё (параметры demo_goals/demo_delta).
-    Математическое ядро (kinematics/collision/trajectory/tree_from_tf)
-    не зависит от ROS и тестируется офлайн.
+    Обратная кинематика обеих рук TienKung 2.0 Pro (7 DOF на руку): цепочка суставов из URDF
+    в /robot_description, DLS-IK с пределами суставов и несколькими стартами, команды в /arm/cmd_pos
+    и дотягивание по /joint_states.
   </description>
   <maintainer email="dev@example.com">hackathon team</maintainer>
   <license>Apache-2.0</license>
 
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>bodyctrl_msgs</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
-  <exec_depend>python3-scipy</exec_depend>
 
-  <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>python3-pytest</test_depend>
 
   <export>

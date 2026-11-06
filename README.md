@@ -8,4 +8,4 @@
 
 - [`focus_tracking/`](focus_tracking) — фокусировка головы на объектах / руках / обоих сразу (HSV+depth детектор, TF2 hand-tracker, контроллер c deadzone/LPF). Математика и архитектура: [docs/FOCUS_TRACKING.md](docs/FOCUS_TRACKING.md). (нестабильно)
 
-- [`arm_ik/`](arm_ik) - Обратная кинематика рук (не запускается)
+- [`arm_ik/`](arm_ik) — обратная кинематика рук по URDF из `/robot_description` (переписана, проверена офлайн-тестами, в симуляторе ещё не проверялась)

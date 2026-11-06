@@ -1,47 +1,23 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""Минимальный setup.py без side-effect'ов при разборе.
-
-Эта версия намеренно НЕ содержит параметра `entry_points`: setuptools при
-разборе setup.py резолвит все console-script entry points через pkg_resources,
-и в сломанных системных окружениях (например, битый pytz/babel из-за
-некорректного /etc/localtime) это роняет даже `setup.py --help-commands`,
-который вызывает colcon на этапе build. Без entry_points разбор всегда лёгкий;
-исполняемые файлы ставятся через data_files в lib/arm_ik (см. bin/), а ROS-ноды
-запускаются так:
-
-    ros2 run arm_ik run_arm_ik.py            # или ./bin/run_arm_ik.py напрямую
-    ros2 launch arm_ik arm_ik.launch.py
-
-numpy/scipy не объявлены как install_requires — пакет умеет работать на
-чистом Python-fallback (arm_ik/_math_compat.py), поэтому сборка проходит и
-на машинах без pip-пакетов.
-"""
 import glob
-import os
 
 from setuptools import setup
 
+package_name = "arm_ik"
+
 setup(
-    name="arm_ik",
-    version="0.4.0",
-    packages=["arm_ik", "arm_ik.nodes"],
-    # файловых конфигов (config/*.json) в пакете больше нет: единственное
-    # дерево звеньев для IK строится из топиков симулятора /tf + /tf_static
-    # (arm_ik/tree_from_tf.py), поэтому package_data/data_files для config
-    # не объявляются.
+    name=package_name,
+    version="1.0.0",
+    packages=[package_name],
     data_files=[
-        ("share/ament_index/resource_index/packages", ["resource/arm_ik"]),
-        ("share/arm_ik", ["package.xml", "README.md", "CHANGELOG.md"]),
-        ("share/arm_ik/launch", glob.glob("launch/*.py")),
-        # standalone-запуск единственной ноды -> lib/arm_ik/ (script_dir из setup.cfg)
-        ("lib/arm_ik", [
-            "bin/_bootstrap.py", "bin/run_arm_ik.py",
-            "arm_ik/nodes/arm_ik_node.py"]),
+        ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
+        ("share/" + package_name, ["package.xml"]),
+        ("share/" + package_name + "/launch", glob.glob("launch/*.py")),
     ],
+    install_requires=["setuptools"],
     zip_safe=True,
     maintainer="hackathon team",
     maintainer_email="dev@example.com",
-    description="IK обеих рук TienKung 2.0 Pro (7 DOF) c limits и защитой стола",
+    description="IK обеих рук TienKung 2.0 Pro (7 DOF) по URDF из /robot_description",
     license="Apache-2.0",
+    entry_points={"console_scripts": ["arm_ik_node = arm_ik.node:main"]},
 )

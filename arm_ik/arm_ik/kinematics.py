@@ -1,450 +1,196 @@
-# -*- coding: utf-8 -*-
-"""Кинематика 7-DOF руки TienKung 2.0 Pro (URDF-кинематическая цепочка).
+"""Кинематика 7-DOF руки TienKung 2.0 Pro по URDF (строка из /robot_description).
 
-Цепочка правой руки (зеркально для левой), базовое звено pelvis:
-
-    body_yaw_joint -> shoulder_pitch_{l,r} -> shoulder_roll_{l,r}
-    -> shoulder_yaw_{l,r} -> elbow_pitch_{l,r} -> elbow_yaw_{l,r}
-    -> wrist_pitch_{l,r} -> wrist_roll_{l,r}
-
-Звенья заданы в канонической KR511/RRRRRRR-форме (как у URDF с осями X/Y/Z):
-для каждого сустава — смещение d вдоль Z_prev, длина a вдоль X_prev,
-смещение d_y вдоль Y_prev и угол скрутки alpha вокруг X_prev.
-
-!!! ВНИМАНИЕ: встроенные числа — только стартовая заглушка. В рантайме точная
-цепочка звеньев строится нодой из топиков симулятора /tf + /tf_static
-(см. arm_ik.tree_from_tf); файлы URDF/JSON для этого не нужны.
-
-Модуль не зависит от ROS: чистый numpy/scipy, легко тестируется офлайн.
+Цепочка строится от base (pelvis) до tip (wrist_roll_{l,r}_link). Суставы рук —
+переменные IK; остальные подвижные суставы цепочки (body_yaw_joint) берутся как
+есть из `extra` (обычно из /joint_states). Не зависит от ROS, только numpy.
 """
-from __future__ import annotations
-
 import math
-from dataclasses import dataclass, field
+import xml.etree.ElementTree as ET
 
-from arm_ik._math_compat import np
-from arm_ik._math_compat import Rotation
+import numpy as np
 
-# ---------------------------------------------------------------------------
-# Описание кинематической цепочки
-# ---------------------------------------------------------------------------
+ARM_JOINTS = ["shoulder_pitch", "shoulder_roll", "shoulder_yaw",
+              "elbow_pitch", "elbow_yaw", "wrist_pitch", "wrist_roll"]
 
 
-@dataclass
-class JointSpec:
-    name: str          # имя сустава как в /joint_states и URDF
-    motor_id: int      # ID мотора как в /arm/cmd_pos (bodyctrl_msgs)
-    axis: np.ndarray   # ось вращения в системе ПРЕДЫДУЩЕго звена (единичный вектор)
-    origin_xyz: np.ndarray = field(default_factory=lambda: np.zeros(3))
-    origin_rpy: np.ndarray = field(default_factory=lambda: np.zeros(3))
-    lower: float = -math.pi
-    upper: float = math.pi
+def rpy_to_R(r, p, y):
+    cr, sr, cp, sp, cy, sy = math.cos(r), math.sin(r), math.cos(p), math.sin(p), math.cos(y), math.sin(y)
+    return np.array([[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+                     [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+                     [-sp, cp * sr, cp * cr]])
 
 
-@dataclass
-class ArmModel:
-    """7-звенная цепочка одной руки от pelvis до link запястья."""
-    side: str                      # 'left' | 'right'
-    joints: list                   # список JointSpec, len == 7
-    tip_link: str                  # имя конечного звена (TF frame кисти)
-    base_frame: str = "pelvis"     # система координат цели (относительно корпуса)
-    # Смещение точки Tool-Center-Point от системы запястья (в метрах, в рамке tip_link).
-    tcp_offset: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 0.0]))
-
-    @property
-    def names(self):
-        return [j.name for j in self.joints]
-
-    @property
-    def ids(self):
-        return [j.motor_id for j in self.joints]
-
-    @property
-    def lower(self):
-        return np.array([j.lower for j in self.joints])
-
-    @property
-    def upper(self):
-        return np.array([j.upper for j in self.joints])
+def axis_angle_R(axis, q):
+    x, y, z = axis
+    c, s = math.cos(q), math.sin(q)
+    C = 1.0 - c
+    return np.array([[c + x * x * C, x * y * C - z * s, x * z * C + y * s],
+                     [y * x * C + z * s, c + y * y * C, y * z * C - x * s],
+                     [z * x * C - y * s, z * y * C + x * s, c + z * z * C]])
 
 
-def _tmat(xyz, rpy):
-    """4x4 матрица трансформации из xyz + rpy (малые углы, XYZ-эксплицитно, как URDF)."""
+def quat_to_R(x, y, z, w):
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def R_to_quat(R):
+    """-> (x, y, z, w)."""
+    t = np.trace(R)
+    if t > 0:
+        s = 2.0 * math.sqrt(t + 1.0)
+        return ((R[2, 1] - R[1, 2]) / s, (R[0, 2] - R[2, 0]) / s, (R[1, 0] - R[0, 1]) / s, 0.25 * s)
+    i = int(np.argmax(np.diag(R)))
+    j, k = (i + 1) % 3, (i + 2) % 3
+    s = 2.0 * math.sqrt(1.0 + R[i, i] - R[j, j] - R[k, k])
+    q = [0.0, 0.0, 0.0, 0.0]
+    q[i] = 0.25 * s
+    q[j] = (R[j, i] + R[i, j]) / s
+    q[k] = (R[k, i] + R[i, k]) / s
+    q[3] = (R[k, j] - R[j, k]) / s
+    return tuple(q)
+
+
+def rot_error(R_cur, R_des):
+    """Вектор поворота (ось * угол) от R_cur к R_des, в рамке базы."""
+    E = R_des @ R_cur.T
+    c = max(-1.0, min(1.0, (np.trace(E) - 1.0) / 2.0))
+    angle = math.acos(c)
+    v = np.array([E[2, 1] - E[1, 2], E[0, 2] - E[2, 0], E[1, 0] - E[0, 1]])
+    if angle < 1e-6:
+        return 0.5 * v
+    if math.pi - angle < 1e-4:   # ~180°: E + I = 2·a·aᵀ, ось — самый длинный столбец
+        M = E + np.eye(3)
+        axis = M[:, int(np.argmax(np.linalg.norm(M, axis=0)))]
+        return angle * axis / np.linalg.norm(axis)
+    return angle * v / (2.0 * math.sin(angle))
+
+
+def make_T(R=None, p=None):
     T = np.eye(4)
-    T[:3, :3] = Rotation.from_euler("xyz", rpy).as_matrix()
-    T[:3, 3] = np.asarray(xyz, dtype=float)
+    if R is not None:
+        T[:3, :3] = R
+    if p is not None:
+        T[:3, 3] = p
     return T
 
 
-def _rot_axis(axis, q):
-    return Rotation.from_rotvec(np.asarray(axis, dtype=float) * q).as_matrix()
+def _floats(s, n=3):
+    return [float(v) for v in s.split()] if s else [0.0] * n
 
 
-def chain_transforms(model: ArmModel, q):
-    """Возвращает список 4x4 матриц T_i = T(pelvis <- joint_i_frame) после i-го сустава."""
-    q = np.asarray(q, dtype=float)
-    assert len(q) == len(model.joints), f"нужно {len(model.joints)} значений, получено {len(q)}"
-    T = np.eye(4)
-    out = []
-    for js, qi in zip(model.joints, q):
-        T = T @ _tmat(js.origin_xyz, js.origin_rpy)
-        R = _rot_axis(js.axis, qi)
-        M = np.eye(4)
-        M[:3, :3] = R
-        T = T @ M
-        out.append(T.copy())
-    return out
+class Arm:
+    """Одна рука: цепочка суставов base -> tip из URDF."""
 
+    def __init__(self, urdf_xml, side, base="pelvis", tip=None, tcp_offset=(0.0, 0.0, 0.0)):
+        tag = "l" if side == "left" else "r"
+        tip = tip or f"wrist_roll_{tag}_link"
+        by_child = {}
+        for j in ET.fromstring(urdf_xml).findall("joint"):
+            o, a, lim = j.find("origin"), j.find("axis"), j.find("limit")
+            by_child[j.find("child").get("link")] = {
+                "name": j.get("name"), "type": j.get("type"), "parent": j.find("parent").get("link"),
+                "T": make_T(rpy_to_R(*_floats(o.get("rpy") if o is not None else None)),
+                            _floats(o.get("xyz") if o is not None else None)),
+                "axis": np.array(_floats(a.get("xyz") if a is not None else "1 0 0")),
+                "lower": float(lim.get("lower", -math.pi)) if lim is not None else -math.pi,
+                "upper": float(lim.get("upper", math.pi)) if lim is not None else math.pi}
 
-def fk(model: ArmModel, q, tcp=True):
-    """Прямая кинематика: возвращает (T_base_tip 4x4, позиции всех суставов 7x3 включая базу).
+        chain, link = [], tip
+        while link != base:
+            if link not in by_child:
+                raise ValueError(f"в URDF нет цепочки {base} -> {tip}")
+            j = by_child[link]
+            if j["type"] == "prismatic":
+                raise ValueError(f"призматический сустав {j['name']} не поддерживается")
+            chain.append(j)
+            link = j["parent"]
+        self.chain = chain[::-1]
 
-    tcp=True (по умолчанию) — поза КОНЧИКА КИСТИ (TCP): кадр последнего звена
-    с учётом model.tcp_offset. Именно эта поза используется в pose_error /
-    IK-целях, поэтому цель и измерение согласованы по определению.
-    tcp=False — чистый кадр link запястья (без смещения TCP).
-    """
-    Ts = chain_transforms(model, q)
-    Ttip = Ts[-1]
-    if tcp:
-        Ttip = Ttip @ _tmat(model.tcp_offset, [0, 0, 0])
-    pts = [np.array([0.0, 0.0, 0.0])] + [T[:3, 3] for T in Ts]
-    return Ttip, np.array(pts)
+        arm = [j for j in self.chain if j["type"] in ("revolute", "continuous")
+               and j["name"].replace(f"_{tag}_joint", "") in ARM_JOINTS]
+        if len(arm) != 7:
+            raise ValueError(f"ожидалось 7 суставов руки, найдено {[j['name'] for j in arm]}")
+        for j in arm:
+            if j["type"] == "continuous":
+                j["lower"], j["upper"] = -math.pi, math.pi
+        self.side, self.base, self.tip = side, base, tip
+        self.names = [j["name"] for j in arm]
+        self.motor_ids = [(11 if side == "left" else 21) + ARM_JOINTS.index(n.replace(f"_{tag}_joint", ""))
+                          for n in self.names]
+        self.lower = np.array([j["lower"] for j in arm])
+        self.upper = np.array([j["upper"] for j in arm])
+        self._index = {n: i for i, n in enumerate(self.names)}
+        self.tcp = make_T(p=np.array(tcp_offset, dtype=float))
 
+    def _frames(self, q, extra):
+        """Поза TCP и (ось, точка) каждого сустава руки в рамке base."""
+        T = np.eye(4)
+        axes = []
+        for j in self.chain:
+            T = T @ j["T"]
+            if j["type"] in ("revolute", "continuous"):
+                i = self._index.get(j["name"])
+                angle = q[i] if i is not None else (extra or {}).get(j["name"], 0.0)
+                if i is not None:
+                    axes.append((T[:3, :3] @ j["axis"], T[:3, 3].copy()))
+                T = T @ make_T(axis_angle_R(j["axis"], angle))
+        return T @ self.tcp, axes
 
-def fk_tcp(model: ArmModel, q):
-    """Поза TCP (кончик кисти) в рамке pelvis: (position 3, quaternion wxyz 4)."""
-    Ttcp, _ = fk(model, q, tcp=True)
-    pos = Ttcp[:3, 3]
-    quat = Rotation.from_matrix(Ttcp[:3, :3]).as_quat()  # xyzw
-    return pos, np.array([quat[3], quat[0], quat[1], quat[2]])
+    def fk(self, q, extra=None):
+        return self._frames(q, extra)[0]
 
+    def jacobian(self, q, extra=None):
+        T, axes = self._frames(q, extra)
+        p = T[:3, 3]
+        J = np.zeros((6, 7))
+        for i, (z, o) in enumerate(axes):
+            J[:3, i] = np.cross(z, p - o)
+            J[3:, i] = z
+        return J
 
-def joint_frames(model: ArmModel, q):
-    """Кадры joints «до» их собственного поворота: F_i = T_{i-1} @ origin_i.
-
-    Для i-го сустава: позиция оси o_i = F_i[:3,3], направление оси
-    z_i = F_i[:3,:3] @ axis_i (URDF: origin применяется к parent frame,
-    затем вращение вокруг axis в этой же рамке).
-    """
-    q = np.asarray(q, dtype=float)
-    frames = []
-    T = np.eye(4)
-    for js, qi in zip(model.joints, q):
-        F = T @ _tmat(js.origin_xyz, js.origin_rpy)
-        frames.append(F.copy())
-        M = np.eye(4)
-        M[:3, :3] = _rot_axis(js.axis, qi)
-        T = F @ M
-    return frames
-
-
-def geometric_jacobian(model: ArmModel, q, point=None):
-    """Якобиан 6x7 (линейная скорость точки + угловая скорость, оси base/world).
-
-    point — точка, для которой считается линейная часть (по умолчанию — TCP).
-    Реализация каноническая: dp/dq_i = z_i x (p - o_i), dR/dq_i = z_i.
-    """
-    Ts = chain_transforms(model, q)
-    if point is None:
-        p = (Ts[-1] @ np.append(model.tcp_offset, 1.0))[:3]
-    else:
-        p = np.asarray(point, dtype=float)
-    Fs = joint_frames(model, q)
-    J = np.zeros((6, len(model.joints)))
-    for i, js in enumerate(model.joints):
-        F = Fs[i]
-        o_i = F[:3, 3]
-        z_i = F[:3, :3] @ np.asarray(js.axis, dtype=float)
-        r = p - o_i
-        J[:3, i] = np.cross(z_i, r)
-        J[3:, i] = z_i
-    return J
-
-
-# ---------------------------------------------------------------------------
-# Решатели обратной кинематики
-# ---------------------------------------------------------------------------
-
-
-def pose_error(T_cur44, T_des44):
-    """6-вектор ошибки позы: позиция (3) + ориентация через log(R_err) (3)."""
-    e_p = T_des44[:3, 3] - T_cur44[:3, 3]
-    R_err = T_des44[:3, :3] @ T_cur44[:3, :3].T
-    e_r = Rotation.from_matrix(R_err).as_rotvec()
-    return np.concatenate([e_p, e_r])
-
-
-def clip_to_limits(q, model: ArmModel, margin=0.0):
-    return np.clip(q, model.lower + margin, model.upper - margin)
-
-
-def ik_dls(model: ArmModel, T_des44, q_init, max_iter=120, tol_pos=1e-3,
-           tol_rot=2e-2, damping=0.05, step_scale=1.0, weight=None,
-           barrier=None, null_gain=0.0, q_prefer=None):
-    """Итеративная IK: Levenberg-Marquardt / Damped Least Squares.
-
-    Учитывает пределы суставов (clip) и приоритетные веса сочленений.
-    Опционально:
-      barrier   — callable(q) -> dq(7,), барьерный градиент (защита от стола);
-      null_gain/q_prefer — подтяжка в нуль-пространстве к предпочтительной
-                  позе (использует 7-ю степень свободы, позу не меняет).
-    Возвращает (q, success, err_norm_history).
-    """
-    q = np.asarray(q_init, dtype=float).copy()
-    W = np.eye(len(model.joints)) if weight is None else np.diag(weight)
-    hist = []
-
-    def _step(cur_q, damp_cur):
-        """Один LM-шаг: возвращает (dq, J, A)."""
-        J = geometric_jacobian(model, cur_q)
-        JW = J @ W
-        A = JW @ J.T + (damp_cur ** 2) * np.eye(6)
-        dq = W @ J.T @ np.linalg.solve(A, e_vec)
-        if barrier is not None:
-            dq = dq + barrier(cur_q)
-        if null_gain > 0.0 and q_prefer is not None:
-            # нуль-пространственная проекция: не влияет на позу TCP
-            Jp_inv = W @ J.T @ np.linalg.inv(A)
-            N = np.eye(len(model.joints)) - Jp_inv @ J
-            dq = dq + null_gain * (N @ (np.asarray(q_prefer) - cur_q))
-        return dq, J, A
-
-    damp = float(damping)
-    for _ in range(max_iter):
-        T, _ = fk(model, q)
-        e_vec = pose_error(T, T_des44)
-        nrm = np.linalg.norm(e_vec)
-        hist.append(nrm)
-        if nrm < 1e-6 or (np.linalg.norm(e_vec[:3]) < tol_pos and np.linalg.norm(e_vec[3:]) < tol_rot):
-            return clip_to_limits(q, model), True, hist
-        # Levenberg–Marquardt с backtracking: уменьшаем шаг (damping растёт),
-        # пока норма ошибки не начнёт убывать. Фиксированный damping из DLS
-        # застревал в ~2 мм от цели при жёстком допуске tol_pos=1e-3.
-        accepted = False
-        d_try = damp
-        for _bt in range(8):
-            dq, _J, _A = _step(q, d_try)
-            alpha = step_scale
-            for _ls in range(5):
-                q_new = clip_to_limits(q + alpha * dq, model, margin=1e-4)
-                if np.allclose(q_new, q, atol=1e-12):
-                    break
-                Tn, _ = fk(model, q_new)
-                nn = np.linalg.norm(pose_error(Tn, T_des44))
-                if nn < nrm:
-                    q = q_new
-                    damp = max(float(damping) * 0.5, d_try * 0.7)  # успех — ослабляем демпфер
-                    accepted = True
-                    break
-                alpha *= 0.5
-            if accepted:
+    def ik(self, T_des, q0, extra=None, rot_weight=1.0, iters=200, tol_pos=1e-3, tol_rot=1e-2,
+           damping=0.05, max_step=0.2):
+        """DLS от q0 с обрезкой по пределам. -> (q, ошибка позиции м, ошибка ориентации рад)."""
+        q = np.clip(np.array(q0, dtype=float), self.lower, self.upper)
+        W = np.diag([1.0, 1.0, 1.0] + [rot_weight] * 3)
+        for _ in range(iters):
+            T = self.fk(q, extra)
+            e = np.concatenate([T_des[:3, 3] - T[:3, 3], rot_error(T[:3, :3], T_des[:3, :3])])
+            ep, er = np.linalg.norm(e[:3]), np.linalg.norm(e[3:])
+            if ep < tol_pos and (rot_weight == 0 or er < tol_rot):
                 break
-            d_try = min(d_try * 2.0, 0.9)
-        if not accepted:
-            return q, False, hist                     # застряли в локальном минимуме
-    T, _ = fk(model, q)
-    e = pose_error(T, T_des44)
-    ok = np.linalg.norm(e[:3]) < tol_pos and np.linalg.norm(e[3:]) < tol_rot
-    return q, ok, hist
+            J = W @ self.jacobian(q, extra)
+            dq = J.T @ np.linalg.solve(J @ J.T + damping ** 2 * np.eye(6), W @ e)
+            n = np.max(np.abs(dq))
+            if n > max_step:
+                dq *= max_step / n
+            q = np.clip(q + dq, self.lower, self.upper)
+        T = self.fk(q, extra)
+        return q, float(np.linalg.norm(T_des[:3, 3] - T[:3, 3])), float(np.linalg.norm(rot_error(T[:3, :3], T_des[:3, :3])))
 
+    def solve(self, T_des, q_now, extra=None, n_random=6, tol_pos=0.005, tol_rot=0.03, rot_weight=1.0, seed=0):
+        """IK из текущей позы, средней позы и случайных стартов.
 
-def ik_multi_seed(model: ArmModel, T_des44, seeds, n_seeds=None, jitter=None, **kw):
-    """Перебор стартовых поз (боремся с локальными минимумами DLS).
-
-    seeds — 2D-список/массив стартов; либо один seed (тогда можно передать
-    n_seeds>1 — к нему добавятся случайные возмущения jitter рад).
-    Берём решение с минимальной ошибкой; при равенстве — ближайшее к seeds[0]
-    (обычно текущая измеренная поза => минимум движения).
-    Возвращает (q, ok, err_pos, err_rot).
-    """
-    import random as _rnd
-    seeds = [np.asarray(s, dtype=float) for s in seeds]         if len(np.shape(seeds)) == 2 else [np.asarray(seeds, dtype=float)]
-    if n_seeds and n_seeds > len(seeds):
-        base = seeds[0]
-        amp = 0.5 if jitter is None else float(jitter)
-        rng = _rnd.Random(0)
-        while len(seeds) < n_seeds:
-            s = np.array([float(v) for v in base])
-            for i in range(len(s)):
-                s[i] = min(max(s[i] + rng.uniform(-amp, amp),
-                               float(model.lower[i])), float(model.upper[i]))
-            seeds.append(s)
-    # страховка от локальных минимумов DLS: если ни один сид не сошёлся,
-    # запускаем дополнительные попытки с более сильным демпфированием —
-    # оно медленнее сходится, но устойчивее к переменной амплитуде шага
-    # (типичный случай: малая дельта-цель рядом с текущей позой).
-    fallback_damps = kw.pop("fallback_damps", (0.10, 0.15))
-    attempts = [(s, dict(kw)) for s in seeds]
-    solved_any = False
-    for s, k in list(attempts):
-        q, ok, _h = ik_dls(model, T_des44, s, **k)
-        if ok:
-            solved_any = True
-            break
-    if not solved_any:
-        # ни один сид не сошёлся — дополнительные попытки с более сильным
-        # демпфированием (устойчивее к локальным минимумам малых дельт)
-        for damp in fallback_damps:
-            for s in seeds[: max(1, len(seeds) // 2)]:
-                k2 = dict(kw)
-                k2["damping"] = damp
-                k2["max_iter"] = max(int(kw.get("max_iter", 120)), 300)
-                attempts.append((s, k2))
-    best, best_key = None, None
-    for s, k in attempts:
-        q, ok, hist = ik_dls(model, T_des44, s, **k)
-        T, _ = fk(model, q)
-        e = pose_error(T, T_des44)
-        key = (not ok, float(np.linalg.norm(e[:3])) * 10 + float(np.linalg.norm(e[3:])),
-               float(np.linalg.norm(q - np.asarray(seeds[0]))))
-        if best_key is None or key < best_key:
-            best, best_key = (q, ok, float(np.linalg.norm(e[:3])),
-                              float(np.linalg.norm(e[3:]))), key
-    return best
-
-
-def solve_pose_xy_zyaw(model: ArmModel, target_pos, yaw_deg=-90.0, roll_deg=0.0, pitch_deg=0.0):
-    """Удобная постановка задачи «взять сверху»: позиция + ориентация кисти с yaw вокруг Z базы."""
-    R = Rotation.from_euler("xyz", [roll_deg, pitch_deg, yaw_deg], degrees=True).as_matrix()
-    T = np.eye(4)
-    T[:3, :3] = R
-    T[:3, 3] = np.asarray(target_pos, dtype=float)
-    return T
-
-
-def pose_to_T(pos, quat_wxyz):
-    """4x4 матрица позы из (позиция 3, кватернион wxyz 4)."""
-    pos = np.asarray(pos, dtype=float)
-    q = np.asarray(quat_wxyz, dtype=float)
-    T = np.eye(4)
-    T[:3, :3] = Rotation.from_quat([q[1], q[2], q[3], q[0]]).as_matrix()
-    T[:3, 3] = pos
-    return T
-
-
-def delta_to_T(T_ref, dpos=None, drot=None, base_ref=True, delta6=None):
-    """Целевая поза из опорной и 6-мерного смещения (delta goal).
-
-    Аргументы (два стиля вызова):
-      delta_to_T(T_ref, dpos, drot)          — dpos(3)/drot(3) отдельно;
-      delta_to_T(T_ref, delta6)              — один 6-вектор [dx,dy,dz,rx,ry,rz];
-      base_ref=True   (по умолчанию): dpos и drot заданы в системе base_frame
-                      (pelvis): p_new = p_ref + dpos; R_new = Rot(drot) @ R_ref.
-      base_ref=False  — «локальная» дельта: смещение в осях текущей ориентации
-                      кисти, вращение постумножением R_new = R_ref @ Rot(drot).
-    """
-    if delta6 is not None and dpos is None:
-        d6 = np.asarray(delta6, dtype=float)
-        dpos, drot = d6[:3], d6[3:]
-    if dpos is None:
-        dpos = np.zeros(3)
-    dpos = np.asarray(dpos, dtype=float)
-    # convenience: один 6-вектор [dx,dy,dz,rx,ry,rz] передан как dpos
-    if (drot is None or len(np.asarray(drot)) == 0) and len(dpos) == 6:
-        drot, dpos = dpos[3:], dpos[:3]
-    if drot is None:
-        drot = np.zeros(3)
-    drot = np.asarray(drot, dtype=float)
-    if len(dpos) != 3:
-        raise ValueError("dpos должен быть 3-мерным (или передайте 6-вектор delta одним аргументом)")
-    if len(drot) != 3:
-        raise ValueError("drot должен быть 3-мерным (rotation vector)")
-    T = np.array(T_ref, dtype=float).copy()
-    R_delta = Rotation.from_rotvec(drot).as_matrix()
-    if base_ref:
-        T[:3, :3] = R_delta @ T_ref[:3, :3]
-        T[:3, 3] = T_ref[:3, 3] + dpos
-    else:
-        T[:3, :3] = T_ref[:3, :3] @ R_delta
-        T[:3, 3] = T_ref[:3, 3] + T_ref[:3, :3] @ dpos
-    return T
-
-
-# ---------------------------------------------------------------------------
-# Встроенные модели рук TienKung 2.0 Pro (стартовая заглушка до TF-дерева)
-# ---------------------------------------------------------------------------
-
-_ARM_LIMITS = {
-    # (lower, upper) по документации INTERFACES.md, рад
-    "shoulder_pitch": (-2.97, 2.97),
-    "shoulder_roll_L": (-0.26, 2.62),
-    "shoulder_roll_R": (-2.62, 0.26),
-    "shoulder_yaw": (-2.97, 2.97),
-    "elbow_pitch": (-2.62, 0.26),
-    "elbow_yaw": (-2.97, 2.97),
-    "wrist_pitch": (-0.79, 1.05),
-    "wrist_roll_L": (-1.66, 1.31),
-    "wrist_roll_R": (-1.31, 1.66),
-}
-
-
-def arm_from_dict(d):
-    """Собирает ArmModel из словаря конфигурации цепочки.
-
-    Единственный поставщик этого dict в рантайме — arm_ik.tree_from_tf
-    (кинематическое дерево из топиков симулятора /tf + /tf_static);
-    файловые конфиги (URDF/JSON) пакет больше не читает.
-    """
-    joints = []
-    for jd in d["joints"]:
-        lo, up = jd["limits"]
-        joints.append(JointSpec(
-            name=jd["name"], motor_id=int(jd["motor_id"]),
-            axis=np.array(jd["axis"], dtype=float),
-            origin_xyz=np.array(jd["origin_xyz"], dtype=float),
-            origin_rpy=np.array(jd["origin_rpy"], dtype=float),
-            lower=float(lo), upper=float(up)))
-    return ArmModel(
-        side=d["side"], joints=joints, tip_link=d["tip_link"],
-        base_frame=d.get("base_frame", "pelvis"),
-        tcp_offset=np.array(d.get("tcp_offset", [0.0, 0.0, 0.0]), dtype=float))
-
-
-def make_default_arm(side: str) -> ArmModel:
-    """Стартовая (шаблонная) модель руки: кронштейн->плечо->локоть->запястье.
-
-    При q=0 кисть смотрит вперёд (+X базы), звенья идут вдоль +Z предыдущей рамки.
-    Используется как заглушка до получения дерева из /tf + /tf_static и в
-    офлайн-тестах; в рантайме нода заменяет её точной цепочкой из TF.
-    """
-    s = 1.0 if side == "left" else -1.0
-    tag = "l" if side == "left" else "r"
-    y_sh = 0.20 * s       # боковое смещение плеча от средней линии (м)
-    z_sh = 1.28           # высота плеча над pelvis (м)
-    a_up = 0.18           # длина плеча до локтя
-    a_fore = 0.20         # длина предплечья до запястья
-    a_wrist = 0.12        # запястье до TCP кончика пальцев ~
-
-    def J(name, mid, axis, xyz, rpy, lim):
-        lo, up = lim
-        return JointSpec(name=name, motor_id=mid, axis=np.array(axis, dtype=float),
-                         origin_xyz=np.array(xyz, dtype=float),
-                         origin_rpy=np.array(rpy, dtype=float),
-                         lower=lo, upper=up)
-
-    joints = [
-        J(f"shoulder_pitch_{tag}_joint", 11 if side == "left" else 21,
-          [0, 1, 0], [0.0, y_sh, z_sh], [0, 0, 0], _ARM_LIMITS["shoulder_pitch"]),
-        J(f"shoulder_roll_{tag}_joint", 12 if side == "left" else 22,
-          [1, 0, 0], [0, 0, 0], [0, 0, 0],
-          _ARM_LIMITS["shoulder_roll_L"] if side == "left" else _ARM_LIMITS["shoulder_roll_R"]),
-        J(f"shoulder_yaw_{tag}_joint", 13 if side == "left" else 23,
-          [0, 0, 1], [a_up, 0, 0], [0, 0, 0], _ARM_LIMITS["shoulder_yaw"]),
-        J(f"elbow_pitch_{tag}_joint", 14 if side == "left" else 24,
-          [0, 1, 0], [0, 0, 0], [0, 0, 0], _ARM_LIMITS["elbow_pitch"]),
-        J(f"elbow_yaw_{tag}_joint", 15 if side == "left" else 25,
-          [1, 0, 0], [a_fore, 0, 0], [0, 0, 0], _ARM_LIMITS["elbow_yaw"]),
-        J(f"wrist_pitch_{tag}_joint", 16 if side == "left" else 26,
-          [0, 1, 0], [0, 0, 0], [0, 0, 0], _ARM_LIMITS["wrist_pitch"]),
-        J(f"wrist_roll_{tag}_joint", 17 if side == "left" else 27,
-          [1, 0, 0], [a_wrist, 0, 0], [0, 0, 0],
-          _ARM_LIMITS["wrist_roll_L"] if side == "left" else _ARM_LIMITS["wrist_roll_R"]),
-    ]
-    return ArmModel(
-        side=side,
-        joints=joints,
-        tip_link=f"wrist_roll_{tag}_link",
-        base_frame="pelvis",
-        tcp_offset=np.array([0.05, 0.0, 0.0]),  # кончик пальцев относительно системы запястья
-    )
+        Из решений в допуске берётся ближайшее к q_now (меньше движения), иначе — с минимальной ошибкой.
+        -> (ok, q, ошибка позиции, ошибка ориентации).
+        """
+        rng = np.random.default_rng(seed)
+        mid = (self.lower + self.upper) / 2.0
+        seeds = [np.array(q_now, dtype=float), mid] + [rng.uniform(self.lower, self.upper) for _ in range(n_random)]
+        best, best_ok = None, None
+        for s in seeds:
+            q, ep, er = self.ik(T_des, s, extra, rot_weight=rot_weight, tol_pos=tol_pos / 5, tol_rot=tol_rot / 5)
+            ok = ep < tol_pos and (rot_weight == 0 or er < tol_rot)
+            if ok:
+                dist = np.linalg.norm(q - q_now)
+                if best_ok is None or dist < best_ok[0]:
+                    best_ok = (dist, q, ep, er)
+                if s is seeds[0]:
+                    break           # из текущей позы сошлось — ближе не найти
+            elif best is None or ep + 0.1 * er < best[1] + 0.1 * best[2]:
+                best = (q, ep, er)
+        if best_ok:
+            return True, best_ok[1], best_ok[2], best_ok[3]
+        return False, best[0], best[1], best[2]

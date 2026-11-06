@@ -1,5 +1,16 @@
 # CHANGELOG — arm_ik
 
+## v1.0.0 — кинематика переписана
+
+* Модель руки строится из URDF в `/robot_description` (раньше — восстанавливалась из `/tf`).
+* Новое ядро `arm_ik/kinematics.py` (~200 строк, только numpy): FK, геометрический якобиан, DLS-IK
+  с пределами суставов, несколько стартов, учёт поворота корпуса.
+* Нода `arm_ik_node` (`arm_ik/node.py`): цели `/arm_ik/goal_{left,right}`, согласованные скорости
+  суставов, дотягивание по `/joint_states`, статус в JSON.
+* Удалены: восстановление дерева из TF, pure-python fallback, bootstrap-лаунчеры, защита стола,
+  траекторный генератор, delta-цели, демо-режимы, сервис `SolveIK` (srv не собирался в ament_python-пакете).
+* Обычная установка через `entry_points`, как у `hello_world`.
+
 ## v0.2.2 — bootstrap устойчив к отсутствию numpy/scipy
 
 * `bin/_bootstrap.py` переписан: при нехватке ЛЮБОГО из `rclpy/numpy/scipy` он
